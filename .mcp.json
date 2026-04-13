@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "google-multi": {
+      "command": "/bin/bash",
+      "args": ["${HOME}/.google-multi-mcp/start.sh"]
+    }
+  }
+}

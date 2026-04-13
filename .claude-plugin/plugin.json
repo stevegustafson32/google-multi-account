@@ -1,0 +1,10 @@
+{
+  "name": "google-multi-account",
+  "version": "0.2.0",
+  "description": "Access Gmail and Google Calendar across multiple Google accounts from Claude. Search, send, draft, and manage emails plus calendar events — all with a configurable account parameter. Hardened for Cowork with auto node discovery and graceful startup.",
+  "author": {
+    "name": "Steve Gustafson"
+  },
+  "repository": "https://github.com/stevegustafson32/google-multi-account",
+  "keywords": ["google", "gmail", "calendar", "multi-account", "oauth", "email", "mcp"]
+}
