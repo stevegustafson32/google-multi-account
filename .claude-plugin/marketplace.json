@@ -1,0 +1,22 @@
+{
+  "name": "stevegustafson32-plugins",
+  "owner": {
+    "name": "Steve Gustafson",
+    "email": "stevegustafson@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "google-multi-account",
+      "source": "./",
+      "description": "Connect multiple Google accounts (Gmail + Calendar) to Claude via MCP",
+      "version": "0.2.0",
+      "author": {
+        "name": "Steve Gustafson"
+      },
+      "license": "MIT",
+      "keywords": ["google", "gmail", "calendar", "mcp", "multi-account", "oauth"],
+      "category": "productivity",
+      "tags": ["email", "calendar", "google-workspace"]
+    }
+  ]
+}
