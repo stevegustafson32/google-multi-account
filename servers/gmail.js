@@ -113,11 +113,13 @@ export async function sendEmail({
   cc,
   bcc,
   replyToMessageId,
+  contentType = "text/plain",
 }) {
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nContent-Type: text/plain; charset=utf-8\n`;
+  const mime = contentType === "text/html" ? "text/html" : "text/plain";
+  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
   if (cc) headers += `Cc: ${cc}\n`;
   if (bcc) headers += `Bcc: ${bcc}\n`;
 
@@ -151,11 +153,12 @@ export async function sendEmail({
   };
 }
 
-export async function createDraft({ account, to, subject, body, cc }) {
+export async function createDraft({ account, to, subject, body, cc, contentType = "text/plain" }) {
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nContent-Type: text/plain; charset=utf-8\n`;
+  const mime = contentType === "text/html" ? "text/html" : "text/plain";
+  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
   if (cc) headers += `Cc: ${cc}\n`;
 
   const raw = Buffer.from(headers + "\n" + body)

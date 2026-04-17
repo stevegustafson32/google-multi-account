@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * index.js — Multi-Account Google MCP Server (v0.2.0)
+ * index.js — Multi-Account Google MCP Server (v0.2.1)
  *
  * Dynamically registers Gmail and Calendar tools based on the accounts
  * configured in ~/.google-multi-mcp/config.json. Supports any number
@@ -45,8 +45,6 @@ if (labels.length === 0) {
       "  cd ~/.google-multi-mcp/server && npm run setup\n" +
       "  Config expected at: " + getConfigPath()
   );
-  // DO NOT process.exit() — start the server with zero tools instead.
-  // Cowork kills MCP servers that crash on startup and won't retry them.
 }
 
 // Build description showing configured accounts
@@ -56,7 +54,7 @@ const accountList = accounts
 
 const server = new McpServer({
   name: "google-multi-account",
-  version: "0.2.0",
+  version: "0.2.1",
   description:
     labels.length > 0
       ? `Multi-account Google MCP — access Gmail and Calendar for: ${accountList}.`
@@ -68,7 +66,6 @@ const server = new McpServer({
 // ========================================
 
 if (labels.length > 0) {
-  // Dynamic enums based on configured accounts
   const AccountParam = z
     .enum(labels)
     .describe(`Which Google account: ${accountList}`);
@@ -127,15 +124,20 @@ if (labels.length > 0) {
       account: AccountParam,
       to: z.string().describe("Recipient email address(es), comma-separated"),
       subject: z.string().describe("Email subject line"),
-      body: z.string().describe("Email body (plain text)"),
+      body: z.string().describe("Email body text. If contentType is text/html, this should be valid HTML."),
       cc: z.string().optional().describe("CC recipients, comma-separated"),
       bcc: z.string().optional().describe("BCC recipients, comma-separated"),
       replyToMessageId: z
         .string()
         .optional()
         .describe("Message ID to reply to (threads the reply)"),
+      contentType: z
+        .enum(["text/plain", "text/html"])
+        .optional()
+        .default("text/plain")
+        .describe('Body format: "text/plain" (default) or "text/html" for rich formatting'),
     },
-    async ({ account, to, subject, body, cc, bcc, replyToMessageId }) => {
+    async ({ account, to, subject, body, cc, bcc, replyToMessageId, contentType }) => {
       const result = await sendEmail({
         account,
         to,
@@ -144,6 +146,7 @@ if (labels.length > 0) {
         cc,
         bcc,
         replyToMessageId,
+        contentType,
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -158,11 +161,16 @@ if (labels.length > 0) {
       account: AccountParam,
       to: z.string().describe("Recipient email address(es)"),
       subject: z.string().describe("Email subject line"),
-      body: z.string().describe("Email body (plain text)"),
+      body: z.string().describe("Email body text. If contentType is text/html, this should be valid HTML."),
       cc: z.string().optional().describe("CC recipients"),
+      contentType: z
+        .enum(["text/plain", "text/html"])
+        .optional()
+        .default("text/plain")
+        .describe('Body format: "text/plain" (default) or "text/html" for rich formatting'),
     },
-    async ({ account, to, subject, body, cc }) => {
-      const result = await createDraft({ account, to, subject, body, cc });
+    async ({ account, to, subject, body, cc, contentType }) => {
+      const result = await createDraft({ account, to, subject, body, cc, contentType });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -327,6 +335,5 @@ async function main() {
 
 main().catch((err) => {
   console.error("[google-multi-account] Fatal error:", err);
-  // Even here, avoid process.exit if possible — but a transport failure is truly fatal
   process.exit(1);
 });
