@@ -1,16 +1,14 @@
 #!/usr/bin/env node
 /**
- * setup-tokens.js — Interactive setup for Google Multi-Account MCP
+ * setup-tokens.js â Interactive setup for Google Multi-Account MCP
  *
  * Usage:
  *   node scripts/setup-tokens.js
  *
- * Walks the user through:
- * 1. Entering GCP OAuth credentials (Client ID + Secret)
- * 2. Adding Google accounts one by one with custom labels
- * 3. OAuth browser flow for each account
+ * Pre-baked OAuth credentials â users just enter their email,
+ * click authorize in the browser, and they're done.
  *
- * Stores everything in ~/.google-multi-mcp/config.json
+ * Stores accounts in ~/.google-multi-mcp/config.json
  */
 
 import http from "http";
@@ -35,6 +33,11 @@ const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ];
 
+// Pre-baked OAuth credentials â users don't need their own GCP project
+const DEFAULT_CLIENT_ID =
+  "900207089503-v48rgg92na8uke9ct02s9lf2nc4bc3ln.apps.googleusercontent.com";
+const DEFAULT_CLIENT_SECRET = "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";
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
@@ -54,8 +57,8 @@ async function authenticateAccount(clientId, clientSecret, label, email) {
     login_hint: email,
   });
 
-  console.log(`\n🔐 Authenticating "${label}" (${email})...`);
-  console.log(`   Opening browser. Sign in with: ${email}\n`);
+  console.log(`\nð Connecting "${label}" (${email})...`);
+  console.log(`   Your browser will open. Sign in with: ${email}\n`);
 
   // Dynamic import for ESM 'open' package
   const open = (await import("open")).default;
@@ -88,8 +91,8 @@ async function authenticateAccount(clientId, clientSecret, label, email) {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`
           <html><body style="font-family:system-ui;text-align:center;padding:60px">
-            <h1>✅ ${label} account connected!</h1>
-            <p>${email} is now linked. You can close this tab.</p>
+            <h1>â ${label} account connected!</h1>
+            <p>${email} is now linked to Claude. You can close this tab.</p>
           </body></html>
         `);
 
@@ -116,70 +119,57 @@ async function authenticateAccount(clientId, clientSecret, label, email) {
 }
 
 async function main() {
-  console.log("╔══════════════════════════════════════════════════╗");
-  console.log("║  Google Multi-Account MCP — Setup               ║");
-  console.log("╚══════════════════════════════════════════════════╝\n");
+  console.log("ââââââââââââââââââââââââââââââââââââââââââââââââââââ");
+  console.log("â  Google Multi-Account MCP â Setup               â");
+  console.log("ââââââââââââââââââââââââââââââââââââââââââââââââââââ\n");
 
   ensureConfigDir();
   const existing = loadConfig();
 
-  let clientId, clientSecret;
+  // Use existing credentials if present, otherwise use pre-baked defaults
+  let clientId = existing?.clientId || DEFAULT_CLIENT_ID;
+  let clientSecret = existing?.clientSecret || DEFAULT_CLIENT_SECRET;
 
-  if (existing?.clientId && existing?.clientSecret) {
-    console.log(`Found existing credentials in ${getConfigPath()}`);
-    const reuse = await ask("Use existing GCP credentials? (y/n): ");
-    if (reuse.toLowerCase() === "y") {
-      clientId = existing.clientId;
-      clientSecret = existing.clientSecret;
+  // Save credentials to config (idempotent)
+  setCredentials(clientId, clientSecret);
+  console.log("â OAuth credentials loaded.\n");
+
+  // Show existing accounts if any
+  if (existing?.accounts?.length) {
+    console.log("Already connected:");
+    for (const a of existing.accounts) {
+      console.log(`  â¢ ${a.label} (${a.email})`);
     }
-  }
-
-  if (!clientId) {
-    console.log("\nYou'll need a Google Cloud Platform OAuth client.");
-    console.log("If you don't have one yet, create it at:");
-    console.log("  https://console.cloud.google.com/auth/clients\n");
-    console.log("Required settings:");
-    console.log("  • Application type: Web application");
-    console.log("  • Authorized redirect URI: http://localhost:3847/oauth/callback");
-    console.log("  • APIs enabled: Gmail API, Google Calendar API\n");
-
-    clientId = await ask("Client ID: ");
-    clientSecret = await ask("Client Secret: ");
-    setCredentials(clientId.trim(), clientSecret.trim());
-    console.log("\n✅ Credentials saved.\n");
+    const cont = await ask("\nAdd another account? (y/n): ");
+    if (cont.toLowerCase() !== "y") {
+      console.log("\nAll set! Restart Claude to pick up any changes.");
+      rl.close();
+      return;
+    }
   }
 
   // Add accounts loop
   let addMore = true;
   let accountNum = (existing?.accounts?.length || 0) + 1;
 
-  if (existing?.accounts?.length) {
-    console.log(`\nExisting accounts:`);
-    for (const a of existing.accounts) {
-      console.log(`  • ${a.label} (${a.email})`);
-    }
-    const cont = await ask("\nAdd another account? (y/n): ");
-    if (cont.toLowerCase() !== "y") addMore = false;
-  }
-
   while (addMore) {
-    console.log(`\n── Account ${accountNum} ──`);
+    console.log(`\nââ Account ${accountNum} ââ`);
     const label = (
-      await ask('Label (e.g. "personal", "work", "client-acme"): ')
+      await ask('Give this account a name (e.g. "personal", "work"): ')
     ).trim();
-    const email = (await ask("Email address: ")).trim();
+    const email = (await ask("Gmail address: ")).trim();
 
     if (!label || !email) {
-      console.log("Skipping — label and email are required.");
+      console.log("Skipping â name and email are required.");
       continue;
     }
 
     try {
       await authenticateAccount(clientId, clientSecret, label, email);
-      console.log(`✅ "${label}" (${email}) connected!\n`);
+      console.log(`â "${label}" (${email}) connected!\n`);
       accountNum++;
     } catch (err) {
-      console.error(`❌ Failed to connect "${label}": ${err.message}\n`);
+      console.error(`â Failed to connect "${label}": ${err.message}\n`);
     }
 
     const more = await ask("Add another account? (y/n): ");
@@ -189,15 +179,15 @@ async function main() {
   const config = loadConfig();
   const total = config?.accounts?.length || 0;
 
-  console.log("\n══════════════════════════════════════════════════");
-  console.log(`  Setup complete! ${total} account(s) configured.`);
+  console.log("\nââââââââââââââââââââââââââââââââââââââââââââââââââ");
+  console.log(`  Done! ${total} account(s) connected.`);
   if (total > 0) {
     for (const a of config.accounts) {
-      console.log(`    • ${a.label} → ${a.email}`);
+      console.log(`    â¢ ${a.label} â ${a.email}`);
     }
   }
-  console.log(`\n  Config: ${getConfigPath()}`);
-  console.log("══════════════════════════════════════════════════\n");
+  console.log(`\n  Restart Claude (Cmd+Q then reopen) to activate.`);
+  console.log("ââââââââââââââââââââââââââââââââââââââââââââââââââ\n");
 
   rl.close();
 }
