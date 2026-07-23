@@ -23,15 +23,14 @@ import {
   getConfigPath,
 } from "../config.js";
 import readline from "readline";
+import { getScopes, SCOPE_VERSION, driveScope } from "../scopes.js";
 
 const REDIRECT_URI = "http://localhost:3847/oauth/callback";
-const SCOPES = [
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/gmail.compose",
-  "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/calendar.events",
-];
+const SCOPES = getScopes();
+
+// `npm run setup -- --reauth` re-consents every account already in the config,
+// which is what you need after the scope list changes (Drive landed in v0.3.0).
+const REAUTH = process.argv.includes("--reauth");
 
 // Pre-baked OAuth credentials â users don't need their own GCP project
 const DEFAULT_CLIENT_ID =
@@ -86,7 +85,7 @@ async function authenticateAccount(clientId, clientSecret, label, email) {
 
       try {
         const { tokens } = await oauth2.getToken(code);
-        addAccount(label, email, tokens.refresh_token);
+        addAccount(label, email, tokens.refresh_token, SCOPE_VERSION);
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`
@@ -133,6 +132,34 @@ async function main() {
   // Save credentials to config (idempotent)
   setCredentials(clientId, clientSecret);
   console.log("â OAuth credentials loaded.\n");
+
+  // ── Re-authorize existing accounts (after a scope change) ──
+  if (REAUTH) {
+    const list = existing?.accounts || [];
+    if (list.length === 0) {
+      console.log("Nothing to re-authorize \u2014 no accounts configured yet.");
+      console.log("Run without --reauth to add your first account.\n");
+      rl.close();
+      return;
+    }
+
+    console.log(`Drive scope: ${driveScope()}`);
+    console.log(`Re-authorizing ${list.length} account(s) with the current scopes.`);
+    console.log("Approve the Google Drive permission on each screen.\n");
+
+    for (const a of list) {
+      try {
+        await authenticateAccount(clientId, clientSecret, a.label, a.email);
+        console.log(`  ${a.label} (${a.email}) re-authorized.\n`);
+      } catch (err) {
+        console.error(`  FAILED ${a.label}: ${err.message}\n`);
+      }
+    }
+
+    console.log("Done. Restart Claude (Cmd+Q then reopen) to pick up the new scopes.\n");
+    rl.close();
+    return;
+  }
 
   // Show existing accounts if any
   if (existing?.accounts?.length) {

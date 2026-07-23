@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 /**
- * index.js — Multi-Account Google MCP Server (v0.2.1)
+ * index.js — Multi-Account Google MCP Server (v0.3.0)
  *
- * Dynamically registers Gmail and Calendar tools based on the accounts
+ * Dynamically registers Gmail, Calendar, and Drive tools based on the accounts
  * configured in ~/.google-multi-mcp/config.json. Supports any number
  * of Google accounts with custom labels.
+ *
+ * v0.3.0 added Drive (the built-in Drive connector only ever sees one identity)
+ * and email attachments in both directions. Drive needs a scope that older
+ * tokens weren't consented for — see scopes.js and `npm run setup -- --reauth`.
  *
  * IMPORTANT: This server must NEVER call process.exit() on config errors.
  * Cowork/Claude Desktop treats a crashed MCP server as permanently dead.
@@ -22,6 +26,8 @@ import {
   createDraft,
   listLabels,
   labelMessage,
+  listAttachments,
+  downloadAttachment,
 } from "./gmail.js";
 import {
   listEvents,
@@ -30,6 +36,16 @@ import {
   deleteEvent,
   findFreeTime,
 } from "./calendar.js";
+import {
+  driveSearch,
+  driveListFolder,
+  driveUpload,
+  driveDownload,
+  driveCreateFolder,
+  driveFileInfo,
+  driveShare,
+} from "./drive.js";
+import { accountNeedsReauth, driveScope } from "./scopes.js";
 
 // ========================================
 // LOAD CONFIG (never crash on failure)
@@ -52,12 +68,26 @@ const accountList = accounts
   .map((a) => `"${a.label}" (${a.email})`)
   .join(", ");
 
+// Drive was added in v0.3.0. Tokens minted before that were consented without
+// the Drive scope, so Drive calls would 403 with a confusing message. Warn once
+// at startup instead — the tools still register, and each one explains itself.
+const staleAccounts = accounts.filter(accountNeedsReauth).map((a) => a.label);
+if (staleAccounts.length > 0) {
+  console.error(
+    `[google-multi-account] Drive scope not yet consented for: ${staleAccounts.join(", ")}.\n` +
+      "  Drive tools will fail until you re-authorize:\n" +
+      "  cd ~/.google-multi-mcp/server && npm run setup -- --reauth"
+  );
+}
+
 const server = new McpServer({
   name: "google-multi-account",
-  version: "0.2.1",
+  version: "0.3.0",
   description:
     labels.length > 0
-      ? `Multi-account Google MCP — access Gmail and Calendar for: ${accountList}.`
+      ? `Multi-account Google MCP — Gmail, Calendar, and Drive for: ${accountList}. ` +
+        "Every tool takes an 'account' parameter, so a file or message in one " +
+        "identity's Drive/mailbox is reachable without switching logins."
       : "Multi-account Google MCP — no accounts configured yet. Run /setup.",
 });
 
@@ -136,8 +166,15 @@ if (labels.length > 0) {
         .optional()
         .default("text/plain")
         .describe('Body format: "text/plain" (default) or "text/html" for rich formatting'),
+      attachments: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Local file paths to attach (absolute or ~/…). Total must stay under 20MB; " +
+            "for anything bigger use drive_upload and send the link."
+        ),
     },
-    async ({ account, to, subject, body, cc, bcc, replyToMessageId, contentType }) => {
+    async ({ account, to, subject, body, cc, bcc, replyToMessageId, contentType, attachments }) => {
       const result = await sendEmail({
         account,
         to,
@@ -147,6 +184,7 @@ if (labels.length > 0) {
         bcc,
         replyToMessageId,
         contentType,
+        attachments,
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -163,14 +201,71 @@ if (labels.length > 0) {
       subject: z.string().describe("Email subject line"),
       body: z.string().describe("Email body text. If contentType is text/html, this should be valid HTML."),
       cc: z.string().optional().describe("CC recipients"),
+      bcc: z.string().optional().describe("BCC recipients"),
       contentType: z
         .enum(["text/plain", "text/html"])
         .optional()
         .default("text/plain")
         .describe('Body format: "text/plain" (default) or "text/html" for rich formatting'),
+      attachments: z
+        .array(z.string())
+        .optional()
+        .describe("Local file paths to attach (absolute or ~/…). Total must stay under 20MB."),
     },
-    async ({ account, to, subject, body, cc, contentType }) => {
-      const result = await createDraft({ account, to, subject, body, cc, contentType });
+    async ({ account, to, subject, body, cc, bcc, contentType, attachments }) => {
+      const result = await createDraft({
+        account,
+        to,
+        subject,
+        body,
+        cc,
+        bcc,
+        contentType,
+        attachments,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "list_attachments",
+    "List the files attached to an email message (filename, type, size, attachmentId).",
+    {
+      account: AccountParam,
+      messageId: z.string().describe("Message ID from search_emails or get_email_thread"),
+    },
+    async ({ account, messageId }) => {
+      const result = await listAttachments({ account, messageId });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "download_attachment",
+    "Save an email attachment to disk. Give either attachmentId or filename; " +
+      "destPath may be a folder (keeps the original name) or a full file path.",
+    {
+      account: AccountParam,
+      messageId: z.string().describe("Message ID the attachment belongs to"),
+      attachmentId: z
+        .string()
+        .optional()
+        .describe("Attachment ID from list_attachments. Omit to select by filename."),
+      filename: z
+        .string()
+        .optional()
+        .describe("Attachment filename to match. Omit both to take the first attachment."),
+      destPath: z
+        .string()
+        .optional()
+        .describe("Destination folder or file path. Defaults to ~/Downloads."),
+    },
+    async (params) => {
+      const result = await downloadAttachment(params);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -319,6 +414,174 @@ if (labels.length > 0) {
       };
     }
   );
+
+  // ── DRIVE TOOLS ──────────────────────────────────────────────
+  //
+  // Every ID parameter also accepts a pasted Drive URL — a folder link copied
+  // from the browser works as-is, no ID extraction needed.
+
+  const FileIdParam = z
+    .string()
+    .describe("Drive file ID, or a pasted Drive URL (…/file/d/<id>/…, …?id=<id>)");
+
+  const FolderIdParam = z
+    .string()
+    .describe("Drive folder ID, or a pasted folder URL (…/drive/folders/<id>)");
+
+  server.tool(
+    "drive_search",
+    `Search a specific account's Google Drive (${labels.join(", ")}). ` +
+      "Use nameContains for filename search, fullText to search inside documents.",
+    {
+      account: AccountParam,
+      nameContains: z.string().optional().describe("Match against the file name"),
+      fullText: z.string().optional().describe("Match against file contents and name"),
+      folderId: FolderIdParam.optional().describe("Restrict the search to one folder"),
+      mimeType: z
+        .string()
+        .optional()
+        .describe(
+          "Exact MIME type filter, e.g. 'application/vnd.google-apps.folder' for folders only"
+        ),
+      rawQuery: z
+        .string()
+        .optional()
+        .describe("Full Drive query syntax, used instead of the fields above"),
+      maxResults: z.number().optional().default(25).describe("Max files (default 25, max 100)"),
+      includeTrashed: z.boolean().optional().default(false).describe("Include trashed files"),
+    },
+    async (params) => {
+      const result = await driveSearch(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "drive_list_folder",
+    "List everything inside a Drive folder.",
+    {
+      account: AccountParam,
+      folderId: FolderIdParam,
+      maxResults: z.number().optional().default(100).describe("Max items (default 100)"),
+    },
+    async (params) => {
+      const result = await driveListFolder(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "drive_upload",
+    "Upload a local file into a specific account's Drive. This is how a file gets " +
+      "into a personal Drive folder from a work login, or the reverse.",
+    {
+      account: AccountParam,
+      filePath: z.string().describe("Local file to upload (absolute or ~/…)"),
+      folderId: FolderIdParam.optional().describe("Destination folder. Omit for My Drive root."),
+      name: z.string().optional().describe("Name in Drive. Defaults to the local filename."),
+      mimeType: z.string().optional().describe("Override the detected content type"),
+      convertTo: z
+        .enum(["none", "document", "spreadsheet", "presentation"])
+        .optional()
+        .default("none")
+        .describe("Convert to a native Google Doc/Sheet/Slides instead of storing the raw file"),
+    },
+    async (params) => {
+      const result = await driveUpload(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "drive_download",
+    "Download a Drive file to disk. Google Docs/Sheets/Slides are exported " +
+      "(.docx/.xlsx/.pptx by default).",
+    {
+      account: AccountParam,
+      fileId: FileIdParam,
+      destPath: z
+        .string()
+        .optional()
+        .describe("Destination folder or file path. Defaults to ~/Downloads."),
+      exportMimeType: z
+        .string()
+        .optional()
+        .describe("Export format for Google-native files, e.g. 'application/pdf'"),
+    },
+    async (params) => {
+      const result = await driveDownload(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "drive_create_folder",
+    "Create a folder in a specific account's Drive.",
+    {
+      account: AccountParam,
+      name: z.string().describe("Folder name"),
+      parentId: FolderIdParam.optional().describe("Parent folder. Omit for My Drive root."),
+    },
+    async (params) => {
+      const result = await driveCreateFolder(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "drive_file_info",
+    "Get metadata and current sharing permissions for a Drive file or folder.",
+    { account: AccountParam, fileId: FileIdParam },
+    async (params) => {
+      const result = await driveFileInfo(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
+    "drive_share",
+    "Grant access to a Drive file or folder. This changes who can see the owner's " +
+      "data, so confirm with the user before calling it. Use type 'user' with an " +
+      "emailAddress for a named person, or type 'anyone' for a link-anyone-can-open.",
+    {
+      account: AccountParam,
+      fileId: FileIdParam,
+      role: z
+        .enum(["reader", "commenter", "writer"])
+        .optional()
+        .default("reader")
+        .describe("Access level to grant"),
+      type: z
+        .enum(["user", "anyone"])
+        .optional()
+        .default("user")
+        .describe("'user' grants to one address; 'anyone' makes it link-accessible"),
+      emailAddress: z.string().optional().describe("Who to share with (required when type=user)"),
+      sendNotification: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Email the person that you shared it (user type only)"),
+    },
+    async (params) => {
+      const result = await driveShare(params);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
 } // end if (labels.length > 0)
 
 // ========================================
@@ -329,7 +592,8 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    `[google-multi-account] MCP running — ${accounts.length} account(s): ${accountList || "none"}`
+    `[google-multi-account] MCP running — ${accounts.length} account(s): ${accountList || "none"}` +
+      (labels.length > 0 ? ` — Gmail + Calendar + Drive (${driveScope().split("/").pop()})` : "")
   );
 }
 

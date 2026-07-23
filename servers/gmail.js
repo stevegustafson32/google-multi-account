@@ -2,7 +2,10 @@
  * gmail.js — Gmail operations for any configured account
  */
 
+import fs from "fs";
+import path from "path";
 import { getGmail, getEmail, resolveAccounts } from "./auth.js";
+import { buildMessage } from "./mime.js";
 
 export async function searchEmails({ account, query, maxResults = 20 }) {
   const labels = resolveAccounts(account);
@@ -99,10 +102,115 @@ export async function getThread({ account, threadId }) {
       date: get("Date"),
       subject: get("Subject"),
       body,
+      attachments: collectAttachments(msg.payload),
     };
   });
 
   return { account, threadId, messages };
+}
+
+/**
+ * Walk a payload tree for parts that are real attachments. Inline images carry
+ * a filename too, so they show up here with inline:true rather than being
+ * dropped — a signature logo and a contract look different to the caller.
+ */
+function collectAttachments(payload, found = []) {
+  if (!payload) return found;
+
+  if (payload.filename && payload.body?.attachmentId) {
+    const disposition = (payload.headers || []).find(
+      (h) => h.name?.toLowerCase() === "content-disposition"
+    )?.value;
+    found.push({
+      filename: payload.filename,
+      mimeType: payload.mimeType,
+      sizeBytes: payload.body.size,
+      attachmentId: payload.body.attachmentId,
+      inline: /inline/i.test(disposition || ""),
+    });
+  }
+  if (payload.parts) payload.parts.forEach((p) => collectAttachments(p, found));
+  return found;
+}
+
+/** List every attachment on a single message, without pulling the bodies. */
+export async function listAttachments({ account, messageId }) {
+  const gmail = getGmail(account);
+  const res = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "full",
+  });
+
+  const headers = res.data.payload?.headers || [];
+  const get = (name) => (headers.find((h) => h.name === name) || {}).value || "";
+  const attachments = collectAttachments(res.data.payload);
+
+  return {
+    account,
+    messageId,
+    subject: get("Subject"),
+    from: get("From"),
+    date: get("Date"),
+    count: attachments.length,
+    attachments,
+  };
+}
+
+/**
+ * Download one attachment to disk. destPath may be a directory (the original
+ * filename is kept) or a full target path.
+ */
+export async function downloadAttachment({ account, messageId, attachmentId, filename, destPath }) {
+  const gmail = getGmail(account);
+
+  // Resolve by filename when the caller has a name but not an id.
+  let id = attachmentId;
+  let name = filename;
+  if (!id) {
+    const listed = await listAttachments({ account, messageId });
+    const match = filename
+      ? listed.attachments.find((a) => a.filename === filename)
+      : listed.attachments[0];
+    if (!match) {
+      throw new Error(
+        filename
+          ? `No attachment named "${filename}" on message ${messageId}`
+          : `Message ${messageId} has no attachments`
+      );
+    }
+    id = match.attachmentId;
+    name = match.filename;
+  }
+
+  const res = await gmail.users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id,
+  });
+
+  const buf = Buffer.from(res.data.data, "base64url");
+
+  let target = destPath
+    ? destPath.startsWith("~")
+      ? path.join(process.env.HOME || "", destPath.slice(1))
+      : path.resolve(destPath)
+    : path.join(process.env.HOME || ".", "Downloads");
+
+  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+    target = path.join(target, name || `attachment-${id.slice(0, 8)}`);
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, buf);
+
+  return {
+    account,
+    messageId,
+    filename: name,
+    savedTo: target,
+    sizeBytes: buf.length,
+    status: "downloaded",
+  };
 }
 
 export async function sendEmail({
@@ -114,18 +222,13 @@ export async function sendEmail({
   bcc,
   replyToMessageId,
   contentType = "text/plain",
+  attachments = [],
 }) {
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  const mime = contentType === "text/html" ? "text/html" : "text/plain";
-  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
-  if (cc) headers += `Cc: ${cc}\n`;
-  if (bcc) headers += `Bcc: ${bcc}\n`;
-
   let threadId;
   if (replyToMessageId) {
-    headers += `In-Reply-To: ${replyToMessageId}\nReferences: ${replyToMessageId}\n`;
     const orig = await gmail.users.messages.get({
       userId: "me",
       id: replyToMessageId,
@@ -134,11 +237,17 @@ export async function sendEmail({
     threadId = orig.data.threadId;
   }
 
-  const raw = Buffer.from(headers + "\n" + body)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  const { raw, attachmentSummary } = buildMessage({
+    from,
+    to,
+    subject,
+    body,
+    cc,
+    bcc,
+    contentType,
+    attachments,
+    inReplyTo: replyToMessageId,
+  });
 
   const params = { userId: "me", requestBody: { raw } };
   if (threadId) params.requestBody.threadId = threadId;
@@ -149,23 +258,34 @@ export async function sendEmail({
     from,
     messageId: res.data.id,
     threadId: res.data.threadId,
+    attachments: attachmentSummary,
     status: "sent",
   };
 }
 
-export async function createDraft({ account, to, subject, body, cc, contentType = "text/plain" }) {
+export async function createDraft({
+  account,
+  to,
+  subject,
+  body,
+  cc,
+  bcc,
+  contentType = "text/plain",
+  attachments = [],
+}) {
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  const mime = contentType === "text/html" ? "text/html" : "text/plain";
-  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
-  if (cc) headers += `Cc: ${cc}\n`;
-
-  const raw = Buffer.from(headers + "\n" + body)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  const { raw, attachmentSummary } = buildMessage({
+    from,
+    to,
+    subject,
+    body,
+    cc,
+    bcc,
+    contentType,
+    attachments,
+  });
 
   const res = await gmail.users.drafts.create({
     userId: "me",
@@ -176,6 +296,8 @@ export async function createDraft({ account, to, subject, body, cc, contentType 
     account,
     from,
     draftId: res.data.id,
+    messageId: res.data.message?.id,
+    attachments: attachmentSummary,
     status: "draft_created",
   };
 }

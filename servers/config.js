@@ -73,13 +73,21 @@ export function getAccountByLabel(label) {
   return getAccounts().find((a) => a.label === label) || null;
 }
 
-export function addAccount(label, email, refreshToken) {
+/**
+ * scopeVersion records which scope set the refresh token was consented under,
+ * so the server can tell a pre-Drive token from a current one. Passed in by the
+ * setup script rather than imported, to keep config.js free of dependencies.
+ */
+export function addAccount(label, email, refreshToken, scopeVersion) {
   const config = loadConfig() || { clientId: "", clientSecret: "", accounts: [] };
+  const record = { label, email, refreshToken };
+  if (scopeVersion !== undefined) record.scopeVersion = scopeVersion;
+
   const existing = config.accounts.findIndex((a) => a.label === label);
   if (existing >= 0) {
-    config.accounts[existing] = { label, email, refreshToken };
+    config.accounts[existing] = record;
   } else {
-    config.accounts.push({ label, email, refreshToken });
+    config.accounts.push(record);
   }
   saveConfig(config);
 }

@@ -7,14 +7,10 @@
 
 import { google } from "googleapis";
 import { loadConfig, getAccounts, saveConfig } from "./config.js";
+import { getScopes } from "./scopes.js";
 
-export const SCOPES = [
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/gmail.compose",
-  "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/calendar.events",
-];
+// Kept as a named export for backwards compatibility; scopes.js is the source.
+export const SCOPES = getScopes();
 
 const clients = new Map();
 
@@ -56,6 +52,10 @@ export function getGmail(label) {
 
 export function getCalendar(label) {
   return google.calendar({ version: "v3", auth: getOAuthClient(label) });
+}
+
+export function getDrive(label) {
+  return google.drive({ version: "v3", auth: getOAuthClient(label) });
 }
 
 export function getEmail(label) {

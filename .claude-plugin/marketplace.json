@@ -8,15 +8,28 @@
     {
       "name": "google-multi-account",
       "source": "./",
-      "description": "Connect multiple Google accounts (Gmail + Calendar) to Claude via MCP",
-      "version": "0.2.0",
+      "description": "Connect multiple Google accounts (Gmail + Calendar + Drive) to Claude via MCP",
+      "version": "0.3.0",
       "author": {
         "name": "Steve Gustafson"
       },
       "license": "MIT",
-      "keywords": ["google", "gmail", "calendar", "mcp", "multi-account", "oauth"],
+      "keywords": [
+        "google",
+        "gmail",
+        "calendar",
+        "drive",
+        "mcp",
+        "multi-account",
+        "oauth",
+        "attachments"
+      ],
       "category": "productivity",
-      "tags": ["email", "calendar", "google-workspace"]
+      "tags": [
+        "email",
+        "calendar",
+        "google-workspace"
+      ]
     }
   ]
 }
