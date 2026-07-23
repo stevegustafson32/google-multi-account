@@ -1,4 +1,4 @@
-# Google Multi-Account MCP (v0.5.0)
+# Google Multi-Account MCP (v0.6.0)
 
 Connect any number of Google accounts (Gmail + Calendar + Drive) to Claude. Search, send, draft, and manage emails with attachments; manage calendar events; upload, download, search, and share Drive files — all with an `account` parameter that routes to the right identity.
 
@@ -19,9 +19,42 @@ The `account` parameter is the whole point. Claude's built-in Google connectors 
 
 ### Prerequisites
 
-- macOS (Claude Desktop / Cowork)
-- Node.js 18+ (NVM, volta, homebrew, or system install all work)
-- A Google Cloud Platform project with Gmail API + Calendar API enabled
+- macOS or Windows (Claude Desktop / Cowork)
+- Node.js 18+ (NVM/nvm-windows, volta, fnm, homebrew, or a system install all work)
+
+No Google Cloud project needed — OAuth credentials are pre-baked. See
+[Distribution](#distribution-read-before-sharing-this) for what that means if you share this.
+
+### The consent screen — read this before you start
+
+Two screens trip people up, in this order:
+
+**1. "Google hasn't verified this app."** Red warning triangle and a **Back to safety**
+button. This is expected: the OAuth client hasn't been through Google's formal verification
+review, which is normal for a self-published plugin asking for Gmail and Drive access.
+Click **Advanced** (bottom left) → **Go to google-multi-account (unsafe)**.
+
+**2. The permissions list, with a checkbox per scope.** **Check every box**, or hit
+**Select all**. An unchecked box is silently omitted from the token, and the usual symptom
+is Drive connecting and then failing every call with `Insufficient Permission`.
+
+Both screens repeat for each account you connect.
+
+### Windows
+
+One package covers both platforms — there is no separate Windows build. `start.cmd` ships
+alongside `start.sh` and discovers node from PATH, volta, nvm-windows, fnm, or Program Files.
+
+| | macOS | Windows |
+|---|---|---|
+| Install dir | `~/.google-multi-mcp/` | `%USERPROFILE%\.google-multi-mcp\` |
+| Launcher | `start.sh` | `start.cmd` |
+| Desktop config | `~/Library/Application Support/Claude/claude_desktop_config.json` | `%APPDATA%\Claude\claude_desktop_config.json` |
+| MCP entry | `"command": "/bin/bash"` | `"command": "cmd", "args": ["/c", "…\\start.cmd"]` |
+
+Registering `"command": "node"` works on Windows only if node came from the official MSI
+installer. With nvm-windows, volta, or fnm it fails the same way bare `node` fails under
+NVM on macOS — which is the whole reason both launchers exist.
 
 ### Quick Start
 
@@ -142,8 +175,9 @@ Add more accounts anytime by running `/add-account` or re-running the setup scri
 
 | Command | Description |
 |---------|-------------|
-| `/setup` | Guided first-time setup (handles everything) |
+| `/setup` | Guided first-time setup (handles everything, both platforms) |
 | `/add-account` | Add another Google account |
+| `/reauth` | Re-consent every account after a scope change or expired token |
 
 ## Upgrading to v0.5.0
 
@@ -167,6 +201,24 @@ working throughout; only the Drive tools fail (`Insufficient Permission`) until 
 The GCP project also needs the **Google Drive API** enabled. If re-auth succeeds but Drive
 calls return `has not been used in project … or it is disabled`, enable it in the console
 for the project that owns your OAuth client, then retry.
+
+## v0.6.0 Changelog
+
+- **Windows support that actually works.** `start.cmd` discovers node from PATH, volta,
+  nvm-windows, fnm, and Program Files, mirroring `start.sh`. `/setup` is now platform-aware
+  with PowerShell equivalents and the correct `%APPDATA%\Claude` config path.
+- **One package, both platforms.** The old `google-multi-account-windows` zip differed from
+  the macOS build in exactly one line of `.mcp.json` — and used `${HOME}`, which Windows
+  doesn't define, so it was broken there anyway. It had drifted three versions behind. The
+  fork is retired.
+- **Cross-platform path bug fixed.** `process.env.HOME` is undefined on Windows, which broke
+  `~` expansion and the default `~/Downloads` target in `drive_upload`, `drive_download`, and
+  `download_attachment`. All now use `os.homedir()`.
+- **`/reauth` command** — wraps `npm run setup -- --reauth` and documents the consent screens.
+- **Consent screens documented** in the README and `/setup`, with the specific warning that an
+  unchecked permission box produces a confusing `Insufficient Permission` later.
+- **Distribution trade-offs documented** — shared OAuth client, the 100-user cap, and what
+  the restricted Drive scope costs at verification time.
 
 ## v0.5.0 Changelog
 
@@ -216,6 +268,24 @@ Hardened based on 6 rounds of real-world Cowork debugging:
 - **Desktop config registration** — Setup command writes to `claude_desktop_config.json` directly. Cowork ignores plugin `.mcp.json` files.
 - **Health checks** — Setup command runs full diagnostics before and after installation.
 - **Battle-tested setup flow** — Every step validated through production debugging.
+
+## Distribution (read before sharing this)
+
+The OAuth client ID and secret are baked into the package, so anyone who installs it uses
+**your** Google Cloud project. Consequences worth understanding:
+
+- **The secret is not secret.** It ships in plaintext in every copy. If the repo is public,
+  treat it as published.
+- **All API traffic lands on your project's quota**, and rotating that client breaks every
+  installed copy at once.
+- **Unverified apps using sensitive or restricted scopes are capped at 100 users.**
+- **`driveScope: "full"` is a Google *restricted* scope.** Formal verification of a restricted
+  scope requires an annual third-party security assessment. `driveScope: "file"` avoids
+  restricted scopes entirely, at the cost of the plugin only seeing files it created itself.
+
+For anything beyond personal or small-team use, have each user create their own OAuth client
+and put the ID/secret in their own `~/.google-multi-mcp/config.json` — the code already
+prefers config values over the pre-baked defaults.
 
 ## Security
 

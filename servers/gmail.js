@@ -17,6 +17,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import {
   getGmail,
@@ -500,11 +501,12 @@ async function _downloadAttachment({ account, messageId, attachmentId, filename,
   });
   const buf = Buffer.from(res.data.data, "base64url");
 
+  // os.homedir() rather than process.env.HOME — HOME is unset on Windows.
   let target = destPath
     ? destPath.startsWith("~")
-      ? path.join(process.env.HOME || "", destPath.slice(1))
+      ? path.join(os.homedir(), destPath.slice(1))
       : path.resolve(destPath)
-    : path.join(process.env.HOME || ".", "Downloads");
+    : path.join(os.homedir(), "Downloads");
 
   if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
     // Strip any path separators a hostile sender put in the filename so the

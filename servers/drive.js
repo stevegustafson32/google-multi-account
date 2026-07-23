@@ -11,6 +11,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { getDrive, getEmail } from "./auth.js";
 import { guessMime } from "./mime.js";
@@ -75,9 +76,10 @@ export function parseDriveId(input) {
   return str;
 }
 
+// os.homedir() rather than process.env.HOME — HOME is unset on Windows.
 function expandPath(p) {
   if (!p) return p;
-  return p.startsWith("~") ? path.join(process.env.HOME || "", p.slice(1)) : path.resolve(p);
+  return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : path.resolve(p);
 }
 
 function shape(file, account) {
@@ -212,7 +214,7 @@ export async function driveDownload({ account, fileId, destPath, exportMimeType 
     ? exportMimeType || EXPORT_DEFAULTS[meta.data.mimeType] || "application/pdf"
     : null;
 
-  let target = expandPath(destPath || path.join(process.env.HOME || ".", "Downloads"));
+  let target = expandPath(destPath || path.join(os.homedir(), "Downloads"));
   if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
     const ext = exportMime ? EXPORT_EXTENSIONS[exportMime] || "" : "";
     const base = meta.data.name.endsWith(ext) ? meta.data.name : meta.data.name + ext;

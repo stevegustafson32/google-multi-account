@@ -30,7 +30,28 @@ credentials automatically.
 5. **Paths with spaces break things.** The plugin install path contains "Application Support"
    and deep UUID directories. Always use `~/.google-multi-mcp/` as the clean install target.
 
-## Step 0: Health Check
+## Step 0: Detect the platform FIRST
+
+Every path in this document differs by OS. Determine which one you're on before running
+anything, and use only that column.
+
+```bash
+uname -s 2>/dev/null || echo "Windows"
+```
+
+| | macOS | Windows |
+|---|---|---|
+| Install dir | `~/.google-multi-mcp/` | `%USERPROFILE%\.google-multi-mcp\` |
+| Launcher | `start.sh` | `start.cmd` |
+| Desktop config | `~/Library/Application Support/Claude/claude_desktop_config.json` | `%APPDATA%\Claude\claude_desktop_config.json` |
+| MCP `command` | `/bin/bash` | `cmd` |
+| MCP `args` | `["/Users/<you>/.google-multi-mcp/start.sh"]` | `["/c", "C:\\Users\\<you>\\.google-multi-mcp\\start.cmd"]` |
+
+The plugin ships both launchers. There is no separate Windows build — an earlier
+"windows" package existed and drifted three versions behind because it was a fork that
+differed only in `.mcp.json`. Do not create one again.
+
+## Step 0.5: Health Check
 
 Before doing anything, run diagnostics:
 
@@ -52,6 +73,16 @@ ls -la ~/.google-multi-mcp/start.sh 2>/dev/null && echo "LAUNCHER: exists" || ec
 
 # Check MCP logs for errors
 tail -20 ~/Library/Logs/Claude/mcp*.log 2>/dev/null | grep -i "google-multi" || echo "LOGS: no google-multi entries"
+```
+
+**Windows equivalent (PowerShell):**
+
+```powershell
+Test-Path $env:USERPROFILE\.google-multi-mcp\server\index.js
+Test-Path $env:USERPROFILE\.google-multi-mcp\server\node_modules\@modelcontextprotocol
+Get-Content $env:USERPROFILE\.google-multi-mcp\config.json -ErrorAction SilentlyContinue
+Select-String -Path $env:APPDATA\Claude\claude_desktop_config.json -Pattern "google-multi"
+Test-Path $env:USERPROFILE\.google-multi-mcp\start.cmd
 ```
 
 Report the results to the user. If everything shows as installed/registered, ask if they want
@@ -100,6 +131,27 @@ ls -la ~/.google-multi-mcp/server/
 for m in index auth config gmail calendar drive mime scopes sanitize; do
   [ -f ~/.google-multi-mcp/server/$m.js ] && echo "  ok   $m.js" || echo "  MISSING $m.js"
 done
+```
+
+**Windows equivalent (PowerShell):**
+
+```powershell
+$install = "$env:USERPROFILE\.google-multi-mcp"
+New-Item -ItemType Directory -Force -Path "$install\server\scripts" | Out-Null
+
+$pluginServers = "$env:CLAUDE_PLUGIN_ROOT\servers"
+if (Test-Path "$pluginServers\index.js") {
+  # Copy every module — never enumerate filenames (see the note above).
+  Copy-Item "$pluginServers\*.js" "$install\server\" -Force
+  Copy-Item "$pluginServers\package.json" "$install\server\" -Force
+  Copy-Item "$pluginServers\package-lock.json" "$install\server\" -Force -ErrorAction SilentlyContinue
+  Copy-Item "$pluginServers\scripts\*.js" "$install\server\scripts\" -Force
+  Copy-Item "$pluginServers\start.cmd" "$install\" -Force
+}
+
+foreach ($m in "index","auth","config","gmail","calendar","drive","mime","scopes","sanitize") {
+  if (Test-Path "$install\server\$m.js") { "  ok   $m.js" } else { "  MISSING $m.js" }
+}
 ```
 
 **IMPORTANT:** If `${CLAUDE_PLUGIN_ROOT}` doesn't resolve or files aren't there (this is a known
@@ -152,6 +204,24 @@ The registration MUST use this exact pattern:
 }
 ```
 
+**On Windows**, the equivalent entry is:
+```json
+{
+  "mcpServers": {
+    "google-multi": {
+      "command": "cmd",
+      "args": ["/c", "C:\\Users\\USERNAME\\.google-multi-mcp\\start.cmd"]
+    }
+  }
+}
+```
+Backslashes must be escaped in JSON, and the path must be absolute — `%USERPROFILE%` is
+not expanded by Claude Desktop. Get the real path with `echo $env:USERPROFILE`.
+
+Registering `"command": "node"` directly works ONLY if node came from the official MSI and
+is on the system PATH. With nvm-windows, volta, or fnm it fails exactly the way NVM does on
+macOS — which is what `start.cmd` exists to solve.
+
 Key points:
 - **command is `/bin/bash`** — NOT `node`, NOT a relative path. `/bin/bash` is a fixed system
   path that always exists on macOS. The `start.sh` script handles finding node.
@@ -179,6 +249,23 @@ Or if node isn't on PATH:
 ```bash
 source ~/.nvm/nvm.sh && cd ~/.google-multi-mcp/server && node scripts/setup-tokens.js
 ```
+
+### Warn them about the two screens BEFORE the browser opens
+
+This is where non-technical users abandon setup. Say this up front:
+
+**Screen 1 — "Google hasn't verified this app."** Red triangle, prominent **Back to safety**
+button that does not complete setup.
+
+> Expected. The OAuth client hasn't been through Google's formal verification review, which
+> is normal for a self-published plugin requesting Gmail and Drive access.
+> Click **Advanced** at the bottom left, then **Go to google-multi-account (unsafe)**.
+
+**Screen 2 — permissions, one checkbox per scope.**
+
+> **Check every box** (or **Select all**). An unchecked box silently omits that permission
+> from the token; the usual symptom is Drive connecting fine and then failing every call
+> with `Insufficient Permission`.
 
 This interactive script will:
 - Use the built-in shared OAuth credentials automatically (no Client ID/Secret needed)

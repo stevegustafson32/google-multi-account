@@ -7,6 +7,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 /** Gmail rejects raw messages well before this, but base64 inflates 4/3, so cap
@@ -74,8 +75,10 @@ export function loadAttachments(paths = []) {
   let total = 0;
 
   for (const raw of paths) {
+    // os.homedir() rather than process.env.HOME — HOME is unset on Windows,
+    // where the equivalent is USERPROFILE.
     const filePath = raw.startsWith("~")
-      ? path.join(process.env.HOME || "", raw.slice(1))
+      ? path.join(os.homedir(), raw.slice(1))
       : path.resolve(raw);
 
     if (!fs.existsSync(filePath)) throw new Error(`Attachment not found: ${filePath}`);
