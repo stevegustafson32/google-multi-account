@@ -76,14 +76,14 @@ PLUGIN_SERVERS="${CLAUDE_PLUGIN_ROOT}/servers"
 
 # If plugin source is available, copy from there
 if [ -d "$PLUGIN_SERVERS" ] && [ -f "$PLUGIN_SERVERS/index.js" ]; then
-  cp "$PLUGIN_SERVERS/index.js" ~/.google-multi-mcp/server/
-  cp "$PLUGIN_SERVERS/auth.js" ~/.google-multi-mcp/server/
-  cp "$PLUGIN_SERVERS/config.js" ~/.google-multi-mcp/server/
-  cp "$PLUGIN_SERVERS/gmail.js" ~/.google-multi-mcp/server/
-  cp "$PLUGIN_SERVERS/calendar.js" ~/.google-multi-mcp/server/
+  # Copy EVERY module — never enumerate filenames here. An earlier version of
+  # this command listed files one by one and silently stopped copying new ones
+  # (sanitize.js, drive.js, mime.js, scopes.js), producing an install that
+  # crashed on import with "server disconnected".
+  cp "$PLUGIN_SERVERS"/*.js ~/.google-multi-mcp/server/
   cp "$PLUGIN_SERVERS/package.json" ~/.google-multi-mcp/server/
   cp "$PLUGIN_SERVERS/package-lock.json" ~/.google-multi-mcp/server/ 2>/dev/null
-  cp "$PLUGIN_SERVERS/scripts/setup-tokens.js" ~/.google-multi-mcp/server/scripts/
+  cp "$PLUGIN_SERVERS/scripts/"*.js ~/.google-multi-mcp/server/scripts/
 fi
 
 # Copy start.sh launcher
@@ -95,6 +95,11 @@ fi
 echo "Files installed to ~/.google-multi-mcp/"
 ls -la ~/.google-multi-mcp/
 ls -la ~/.google-multi-mcp/server/
+
+# Every module index.js imports must be present or the server dies on startup.
+for m in index auth config gmail calendar drive mime scopes sanitize; do
+  [ -f ~/.google-multi-mcp/server/$m.js ] && echo "  ok   $m.js" || echo "  MISSING $m.js"
+done
 ```
 
 **IMPORTANT:** If `${CLAUDE_PLUGIN_ROOT}` doesn't resolve or files aren't there (this is a known

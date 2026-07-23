@@ -1,4 +1,4 @@
-# Google Multi-Account MCP (v0.3.0)
+# Google Multi-Account MCP (v0.5.0)
 
 Connect any number of Google accounts (Gmail + Calendar + Drive) to Claude. Search, send, draft, and manage emails with attachments; manage calendar events; upload, download, search, and share Drive files — all with an `account` parameter that routes to the right identity.
 
@@ -10,6 +10,7 @@ The `account` parameter is the whole point. Claude's built-in Google connectors 
 - **Attachments**: Send files with any email or draft; list and download attachments off received mail
 - **Drive**: Search, list folders, upload, download, create folders, inspect, share — per account
 - **Calendar**: List events, create/update/delete events, find free time across all calendars
+- **Injection-hardened**: Email content is sanitized before it reaches the model; email headers are CRLF-guarded
 - **Multi-account**: Configure as many Google accounts as you need, each with a custom label
 - **Cross-account search**: Use `account: "all"` to search email or calendar across every connected account
 - **Free time finder**: Merges all calendars to show when you're truly available
@@ -74,7 +75,8 @@ See the `/setup` command or `skills/google-setup/references/gcp-walkthrough.md` 
 | `send_email` | Send from any connected account, with attachments |
 | `create_email_draft` | Create a draft (doesn't send), with attachments |
 | `list_attachments` | List files attached to a message |
-| `download_attachment` | Save an attachment to disk |
+| `download_attachment` | Save an attachment to disk (preferred for large/binary) |
+| `get_attachment` | Return an attachment as base64 |
 | `list_email_labels` | List Gmail labels/folders |
 | `label_email` | Add/remove labels from messages |
 | `list_calendar_events` | List events from one or all calendars |
@@ -143,9 +145,16 @@ Add more accounts anytime by running `/add-account` or re-running the setup scri
 | `/setup` | Guided first-time setup (handles everything) |
 | `/add-account` | Add another Google account |
 
-## Upgrading to v0.3.0
+## Upgrading to v0.5.0
 
-Drive needs a scope your existing tokens were never consented for. Re-authorize once:
+Drive needs a scope existing tokens were never consented for, and v0.4.0 added two
+dependencies. Upgrade with:
+
+```bash
+cd ~/.google-multi-mcp/server && npm install
+```
+
+Then re-authorize once:
 
 ```bash
 cd ~/.google-multi-mcp/server && npm run setup -- --reauth
@@ -159,7 +168,7 @@ The GCP project also needs the **Google Drive API** enabled. If re-auth succeeds
 calls return `has not been used in project … or it is disabled`, enable it in the console
 for the project that owns your OAuth client, then retry.
 
-## v0.3.0 Changelog
+## v0.5.0 Changelog
 
 - **Drive tools** — search, list, upload, download, create folder, file info, share. Per account.
 - **Email attachments both ways** — send/draft with local files (multipart MIME, 20MB cap);
@@ -173,6 +182,29 @@ for the project that owns your OAuth client, then retry.
 - **Stale-token warning** — the server logs which accounts predate the Drive scope at startup.
 - **RFC 2047 subject encoding** — accented and non-Latin subject lines no longer mangle.
 - **Shared drive support** — Drive calls set `supportsAllDrives`, so Workspace shared drives resolve.
+- **`download_attachment`** — writes to disk and returns a path, instead of `get_attachment`
+  pushing base64 through the conversation. Filenames are `basename`d so a hostile sender
+  can't path-traverse out of the destination folder.
+- **`/setup` copy list fixed** — it enumerated server modules by name and had already gone
+  stale (`sanitize.js` was missing), so a fresh install crashed on import with
+  "server disconnected". It now copies `*.js` and verifies every module landed.
+
+## v0.4.0 Changelog
+
+Shipped as a package but never committed to git; recovered and merged in v0.5.0.
+
+- **`sanitize.js`** — untrusted email content is parsed, stripped, decoded, NFKC-normalized,
+  and length-capped before reaching the model: script/style bodies, HTML entities that decode
+  to live syntax, CSS-hidden text, zero-width and bidi characters, the Unicode Tags block
+  used for invisible steganography, and homoglyph confusables. Output is wrapped in explicit
+  untrusted-data delimiters.
+- **CRLF header-injection guard** on every send/draft header field.
+- **Correct reply threading** — `In-Reply-To`/`References` use the original RFC 5322
+  `Message-ID` rather than Gmail's internal resource id.
+- **Body extraction fixed** — prefers `text/plain` regardless of MIME tree order.
+- **`withAuthErrorHandling`** — an expired refresh token returns a structured re-auth hint
+  with the exact command instead of an opaque 401.
+- **`replyToMessageId` on drafts**, `list_attachments`, `get_attachment`.
 
 ## v0.2.0 Changelog
 

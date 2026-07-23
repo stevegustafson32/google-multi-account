@@ -8,8 +8,16 @@
  *  - In-Reply-To / References use the original message's RFC 5322 Message-ID
  *    header value (not Gmail's internal resource id).
  *  - Body extraction prefers text/plain regardless of part-tree order.
+ *
+ * v0.5.0:
+ *  - send/draft accept local file attachments; message construction moved to
+ *    mime.js (multipart/mixed). The CRLF guards and Message-ID threading above
+ *    still run first — attachments changed the body, not the header rules.
+ *  - Threads report an attachments array; download_attachment writes to disk.
  */
 
+import fs from "fs";
+import path from "path";
 import {
   getGmail,
   getEmail,
@@ -17,6 +25,7 @@ import {
   withAuthErrorHandling,
 } from "./auth.js";
 import { sanitizeText, sanitizeHtml, wrapUntrusted } from "./sanitize.js";
+import { buildMessage } from "./mime.js";
 
 const HEADER_FIELD_MAX = 1000;
 const SNIPPET_MAX = 2000;
@@ -159,6 +168,12 @@ async function _getThread({ account, threadId }) {
       date: get("Date"),
       subject: sanitizeText(get("Subject"), { maxLen: HEADER_FIELD_MAX }),
       body: wrapUntrusted(body),
+      // Filenames come from the sender, so they get the same scrubbing as any
+      // other attacker-controlled string.
+      attachments: collectAttachments(msg.payload).map((a) => ({
+        ...a,
+        filename: sanitizeText(a.filename, { maxLen: 256 }),
+      })),
     };
   });
 
@@ -177,6 +192,7 @@ async function _sendEmail({
   bcc,
   replyToMessageId,
   contentType = "text/plain",
+  attachments = [],
 }) {
   // Block header injection up front.
   assertNoCRLF("to", to);
@@ -187,25 +203,25 @@ async function _sendEmail({
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  const mime = contentType === "text/html" ? "text/html" : "text/plain";
-  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
-  if (cc) headers += `Cc: ${cc}\n`;
-  if (bcc) headers += `Bcc: ${bcc}\n`;
-
   let threadId;
+  let inReplyTo;
   if (replyToMessageId) {
     const refs = await fetchOriginalMessageRefs(gmail, replyToMessageId);
-    if (refs.messageIdHeader) {
-      headers += `In-Reply-To: ${refs.messageIdHeader}\nReferences: ${refs.messageIdHeader}\n`;
-    }
+    inReplyTo = refs.messageIdHeader || undefined;
     threadId = refs.threadId;
   }
 
-  const raw = Buffer.from(headers + "\n" + body)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  const { raw, attachmentSummary } = buildMessage({
+    from,
+    to,
+    subject,
+    body,
+    cc,
+    bcc,
+    contentType,
+    attachments,
+    inReplyTo,
+  });
 
   const params = { userId: "me", requestBody: { raw } };
   if (threadId) params.requestBody.threadId = threadId;
@@ -216,6 +232,7 @@ async function _sendEmail({
     from,
     messageId: res.data.id,
     threadId: res.data.threadId,
+    attachments: attachmentSummary,
     status: "sent",
   };
 }
@@ -229,34 +246,38 @@ async function _createDraft({
   subject,
   body,
   cc,
+  bcc,
   replyToMessageId,
   contentType = "text/plain",
+  attachments = [],
 }) {
   assertNoCRLF("to", to);
   assertNoCRLF("subject", subject);
   assertNoCRLF("cc", cc);
+  assertNoCRLF("bcc", bcc);
 
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  const mime = contentType === "text/html" ? "text/html" : "text/plain";
-  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
-  if (cc) headers += `Cc: ${cc}\n`;
-
   let threadId;
+  let inReplyTo;
   if (replyToMessageId) {
     const refs = await fetchOriginalMessageRefs(gmail, replyToMessageId);
-    if (refs.messageIdHeader) {
-      headers += `In-Reply-To: ${refs.messageIdHeader}\nReferences: ${refs.messageIdHeader}\n`;
-    }
+    inReplyTo = refs.messageIdHeader || undefined;
     threadId = refs.threadId;
   }
 
-  const raw = Buffer.from(headers + "\n" + body)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  const { raw, attachmentSummary } = buildMessage({
+    from,
+    to,
+    subject,
+    body,
+    cc,
+    bcc,
+    contentType,
+    attachments,
+    inReplyTo,
+  });
 
   const message = { raw };
   if (threadId) message.threadId = threadId;
@@ -271,6 +292,7 @@ async function _createDraft({
     from,
     draftId: res.data.id,
     threadId: res.data.message?.threadId,
+    attachments: attachmentSummary,
     status: "draft_created",
   };
 }
@@ -414,5 +436,91 @@ async function _getAttachment({
     filename,
     size: res.data.size,
     data: res.data.data,
+  };
+}
+
+
+/**
+ * Walk a payload tree for parts that are real attachments. Inline images carry
+ * a filename too, so they are reported with inline:true rather than dropped —
+ * a signature logo and a contract look different to the caller.
+ */
+function collectAttachments(payload, found = []) {
+  if (!payload) return found;
+
+  if (payload.filename && payload.body?.attachmentId) {
+    const disposition = (payload.headers || []).find(
+      (h) => h.name?.toLowerCase() === "content-disposition"
+    )?.value;
+    found.push({
+      filename: payload.filename,
+      mimeType: payload.mimeType,
+      sizeBytes: payload.body.size,
+      attachmentId: payload.body.attachmentId,
+      inline: /inline/i.test(disposition || ""),
+    });
+  }
+  if (payload.parts) payload.parts.forEach((p) => collectAttachments(p, found));
+  return found;
+}
+
+export async function downloadAttachment(params) {
+  return withAuthErrorHandling(params.account, () => _downloadAttachment(params));
+}
+/**
+ * Save an attachment to disk. get_attachment returns base64 into the model's
+ * context, which is the wrong shape for anything large or binary — this writes
+ * straight to a file and returns only the path.
+ */
+async function _downloadAttachment({ account, messageId, attachmentId, filename, destPath }) {
+  const gmail = getGmail(account);
+
+  let id = attachmentId;
+  let name = filename;
+  if (!id) {
+    const listed = await _listAttachments({ account, messageId });
+    const match = filename
+      ? listed.attachments.find((a) => a.filename === filename)
+      : listed.attachments[0];
+    if (!match) {
+      throw new Error(
+        filename
+          ? `No attachment named "${filename}" on message ${messageId}`
+          : `Message ${messageId} has no attachments`
+      );
+    }
+    id = match.attachmentId;
+    name = match.filename;
+  }
+
+  const res = await gmail.users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id,
+  });
+  const buf = Buffer.from(res.data.data, "base64url");
+
+  let target = destPath
+    ? destPath.startsWith("~")
+      ? path.join(process.env.HOME || "", destPath.slice(1))
+      : path.resolve(destPath)
+    : path.join(process.env.HOME || ".", "Downloads");
+
+  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+    // Strip any path separators a hostile sender put in the filename so the
+    // write can't escape the destination directory.
+    const safe = path.basename(name || `attachment-${id.slice(0, 8)}`);
+    target = path.join(target, safe);
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, buf);
+
+  return {
+    account,
+    messageId,
+    filename: name,
+    savedTo: target,
+    sizeBytes: buf.length,
+    status: "downloaded",
   };
 }
