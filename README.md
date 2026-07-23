@@ -1,4 +1,4 @@
-# Google Multi-Account MCP (v0.6.0)
+# Google Multi-Account MCP (v0.7.0)
 
 Connect any number of Google accounts (Gmail + Calendar + Drive) to Claude. Search, send, draft, and manage emails with attachments; manage calendar events; upload, download, search, and share Drive files — all with an `account` parameter that routes to the right identity.
 
@@ -22,8 +22,9 @@ The `account` parameter is the whole point. Claude's built-in Google connectors 
 - macOS or Windows (Claude Desktop / Cowork)
 - Node.js 18+ (NVM/nvm-windows, volta, fnm, homebrew, or a system install all work)
 
-No Google Cloud project needed — OAuth credentials are pre-baked. See
-[Distribution](#distribution-read-before-sharing-this) for what that means if you share this.
+You provide your own Google OAuth client (a 5-minute, one-time GCP setup — `/setup` walks you
+through it). Nothing is pre-baked; your credentials live only in your local, gitignored config.
+See [Security](SECURITY.md) for why.
 
 ### The consent screen — read this before you start
 
@@ -179,6 +180,9 @@ Add more accounts anytime by running `/add-account` or re-running the setup scri
 | `/add-account` | Add another Google account |
 | `/reauth` | Re-consent every account after a scope change or expired token |
 
+Rotating a leaked/old client secret? Update it without re-consenting accounts:
+`cd ~/.google-multi-mcp/server && npm run setup -- --credentials` (see [SECURITY.md](SECURITY.md)).
+
 ## Upgrading to v0.5.0
 
 Drive needs a scope existing tokens were never consented for, and v0.4.0 added two
@@ -201,6 +205,16 @@ working throughout; only the Drive tools fail (`Insufficient Permission`) until 
 The GCP project also needs the **Google Drive API** enabled. If re-auth succeeds but Drive
 calls return `has not been used in project … or it is disabled`, enable it in the console
 for the project that owns your OAuth client, then retry.
+
+## v0.7.0 Changelog — security
+
+- **Removed the hard-coded OAuth client secret** (`servers/scripts/setup-tokens.js`). Google's
+  scanner flagged it; see [SECURITY.md](SECURITY.md) for the incident and rotation runbook.
+- **Bring-your-own credentials.** `/setup` prompts for a Client ID + Secret and stores them
+  only in the local gitignored config. No credentials ship in the repo or package.
+- **`npm run setup -- --credentials`** — replace credentials without re-consenting accounts
+  (refresh tokens survive a secret rotation).
+- Removed all "pre-baked OAuth / no GCP setup needed" claims from README, manifest, and `/setup`.
 
 ## v0.6.0 Changelog
 
@@ -269,23 +283,21 @@ Hardened based on 6 rounds of real-world Cowork debugging:
 - **Health checks** — Setup command runs full diagnostics before and after installation.
 - **Battle-tested setup flow** — Every step validated through production debugging.
 
-## Distribution (read before sharing this)
+## Distribution
 
-The OAuth client ID and secret are baked into the package, so anyone who installs it uses
-**your** Google Cloud project. Consequences worth understanding:
+Each user brings their own OAuth client — the plugin ships **no** credentials. On first
+`/setup` the user is prompted for a Client ID and Secret and pointed at
+`skills/google-setup/references/gcp-walkthrough.md`. Their values are written only to their
+local `~/.google-multi-mcp/config.json` (gitignored, mode `0600`).
 
-- **The secret is not secret.** It ships in plaintext in every copy. If the repo is public,
-  treat it as published.
-- **All API traffic lands on your project's quota**, and rotating that client breaks every
-  installed copy at once.
-- **Unverified apps using sensitive or restricted scopes are capped at 100 users.**
-- **`driveScope: "full"` is a Google *restricted* scope.** Formal verification of a restricted
-  scope requires an annual third-party security assessment. `driveScope: "file"` avoids
-  restricted scopes entirely, at the cost of the plugin only seeing files it created itself.
+This is deliberate: a shared client means shipping its secret in public source, which is
+exactly what happened in the [2026-07-23 incident](SECURITY.md#incident--leaked-oauth-client-secret-2026-07-23).
+Per-user clients keep each install on its own quota and its own consent, with nothing secret
+in the repo or the package.
 
-For anything beyond personal or small-team use, have each user create their own OAuth client
-and put the ID/secret in their own `~/.google-multi-mcp/config.json` — the code already
-prefers config values over the pre-baked defaults.
+`driveScope: "full"` (`auth/drive`) is a Google *restricted* scope; a published, verified app
+using it triggers an annual third-party security assessment. `driveScope: "file"` avoids
+restricted scopes entirely, at the cost of only seeing files the plugin created.
 
 ## Security
 

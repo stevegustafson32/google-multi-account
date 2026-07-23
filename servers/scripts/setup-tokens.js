@@ -5,10 +5,10 @@
  * Usage:
  *   node scripts/setup-tokens.js
  *
- * Pre-baked OAuth credentials — users just enter their email,
- * click authorize in the browser, and they're done.
+ * Brings its own OAuth client (prompted once, stored in the local config).
+ * No credentials are embedded in this file.
  *
- * Stores accounts in ~/.google-multi-mcp/config.json
+ * Stores accounts and credentials in ~/.google-multi-mcp/config.json (gitignored)
  */
 
 import http from "http";
@@ -32,18 +32,47 @@ const SCOPES = getScopes();
 // which is what you need after the scope list changes (Drive landed in v0.5.0).
 const REAUTH = process.argv.includes("--reauth");
 
-// Pre-baked OAuth credentials — users don't need their own GCP project
-const DEFAULT_CLIENT_ID =
-  "900207089503-v48rgg92na8uke9ct02s9lf2nc4bc3ln.apps.googleusercontent.com";
-const DEFAULT_CLIENT_SECRET = "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";
+// `npm run setup -- --credentials` replaces only the OAuth client id/secret and
+// exits, without touching account tokens. Use it after rotating a secret in the
+// Cloud console — existing refresh tokens survive a secret rotation.
+const CREDENTIALS_ONLY = process.argv.includes("--credentials");
 
+// No credentials are baked into this file. A shared OAuth client means shipping
+// its secret in public source, which Google's scanner flags and which lets
+// anyone impersonate the app on your project's quota. Each install brings its
+// own client (id + secret), stored only in the local, gitignored config.json.
+// See skills/google-setup/references/gcp-walkthrough.md.
+
+// Line-queue input instead of rl.question. rl.question races badly with EOF on
+// piped/redirected stdin — a fast pipe can close before the callback fires,
+// hanging the promise and exiting 0 silently, or resolving in the wrong order.
+// Buffering 'line' events and dispensing them handles a human at a TTY and a
+// scripted `printf ... | setup` identically. Answers requested after stdin
+// closes resolve to "" so validation runs deterministically.
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
 });
 
+const lineQueue = [];
+const waiters = [];
+let stdinClosed = false;
+
+rl.on("line", (line) => {
+  const w = waiters.shift();
+  if (w) w(line);
+  else lineQueue.push(line);
+});
+rl.on("close", () => {
+  stdinClosed = true;
+  while (waiters.length) waiters.shift()("");
+});
+
 function ask(question) {
-  return new Promise((resolve) => rl.question(question, resolve));
+  process.stdout.write(question);
+  if (lineQueue.length) return Promise.resolve(lineQueue.shift());
+  if (stdinClosed) return Promise.resolve("");
+  return new Promise((resolve) => waiters.push(resolve));
 }
 
 async function authenticateAccount(clientId, clientSecret, label, email) {
@@ -125,18 +154,47 @@ async function main() {
   ensureConfigDir();
   const existing = loadConfig();
 
-  // Use existing credentials if present, otherwise use pre-baked defaults
-  let clientId = existing?.clientId || DEFAULT_CLIENT_ID;
-  let clientSecret = existing?.clientSecret || DEFAULT_CLIENT_SECRET;
+  // Bring-your-own OAuth client. Prompt when the config has no credentials yet,
+  // or when the user explicitly asks to replace them (`--credentials`, e.g. after
+  // rotating a leaked secret in the Cloud console).
+  const needCreds =
+    CREDENTIALS_ONLY || !existing?.clientId || !existing?.clientSecret;
 
-  // Save credentials to config (idempotent)
-  setCredentials(clientId, clientSecret);
+  let clientId = existing?.clientId;
+  let clientSecret = existing?.clientSecret;
 
-  // Tell the user which credentials are active
-  if (clientId === DEFAULT_CLIENT_ID) {
-    console.log("✅ Using default shared credentials (no GCP project needed).\n");
+  if (needCreds) {
+    console.log("This plugin uses your own Google OAuth client (nothing is pre-baked).");
+    console.log("Create one — 5 minutes, one time:");
+    console.log("  1. https://console.cloud.google.com  → create/pick a project");
+    console.log("  2. Enable the Gmail, Google Calendar, and Google Drive APIs");
+    console.log("  3. OAuth consent screen: External, add yourself as a test user");
+    console.log("  4. Credentials → Create OAuth client ID → Web application");
+    console.log("     Authorized redirect URI:  http://localhost:3847/oauth/callback");
+    console.log("  5. Copy the Client ID and Client Secret below.");
+    console.log("  (Full walkthrough: skills/google-setup/references/gcp-walkthrough.md)\n");
+
+    const idIn = (await ask(`Client ID${clientId ? ` [${clientId}]` : ""}: `)).trim();
+    const secretIn = (await ask("Client Secret: ")).trim();
+    clientId = idIn || clientId;
+    clientSecret = secretIn || clientSecret;
+
+    if (!clientId || !clientSecret) {
+      console.error("\n❌ Both a Client ID and Client Secret are required. Nothing saved.");
+      rl.close();
+      return;
+    }
+    setCredentials(clientId, clientSecret);
+    console.log("✅ Credentials saved to ~/.google-multi-mcp/config.json (gitignored, mode 0600).\n");
+
+    if (CREDENTIALS_ONLY) {
+      console.log("Credentials updated. Existing account tokens are unchanged — no re-auth needed");
+      console.log("unless a tool reports an auth error. Restart Claude to pick up the change.\n");
+      rl.close();
+      return;
+    }
   } else {
-    console.log("✅ Using user-provided credentials from ~/.google-multi-mcp/config.json.\n");
+    console.log("✅ Using your saved credentials from ~/.google-multi-mcp/config.json.\n");
   }
 
   // ── Re-authorize existing accounts (after a scope change) ──
@@ -193,6 +251,9 @@ async function main() {
     const email = (await ask("Gmail address: ")).trim();
 
     if (!label || !email) {
+      // On closed stdin every ask() returns "" — a bare `continue` here would
+      // spin forever. Stop instead of looping when there's no more input.
+      if (stdinClosed) break;
       console.log("Skipping — name and email are required.");
       continue;
     }

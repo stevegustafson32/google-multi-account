@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * index.js — Multi-Account Google MCP Server (v0.6.0)
+ * index.js — Multi-Account Google MCP Server (v0.7.0)
  *
  * Dynamically registers Gmail, Calendar, and Drive tools based on the accounts
  * configured in ~/.google-multi-mcp/config.json. Supports any number
@@ -79,7 +79,7 @@ if (staleAccounts.length > 0) {
 
 const server = new McpServer({
   name: "google-multi-account",
-  version: "0.6.0",
+  version: "0.7.0",
   description:
     labels.length > 0
       ? `Multi-account Google MCP — Gmail, Calendar, and Drive for: ${accountList}. ` +
