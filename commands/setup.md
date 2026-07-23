@@ -9,9 +9,15 @@ Guide the user through setting up the Google Multi-Account MCP plugin. This comm
 everything: copying server files, installing dependencies, registering with Claude Desktop,
 and authenticating Google accounts.
 
-## CRITICAL LESSONS (from real-world installation failures)
+## CRITICAL: Pre-baked OAuth Credentials
 
-These are non-negotiable requirements learned from production debugging:
+This plugin ships with pre-baked OAuth credentials. Users do NOT need to create a GCP project,
+enable APIs, or generate their own OAuth client. The setup-tokens.js script uses shared
+credentials automatically.
+
+**NEVER walk users through GCP project setup unless they explicitly ask to use their own credentials.**
+
+## CRITICAL LESSONS (from real-world installation failures)
 
 1. **Cowork IGNORES plugin `.mcp.json` files.** MCP servers MUST be registered in
    `~/Library/Application Support/Claude/claude_desktop_config.json` to connect.
@@ -155,30 +161,9 @@ whoami
 Generate the complete updated config JSON and give the user a single command to write it.
 Use `cat > ... << 'EOF'` heredoc pattern.
 
-## Step 4: Google Cloud Project Setup
+## Step 4: Authenticate Accounts
 
-Ask if the user already has a GCP project with Gmail and Calendar APIs enabled.
-
-If NO, walk them through:
-1. Go to https://console.cloud.google.com
-2. Create a new project (e.g., "Claude Google MCP")
-3. Enable Gmail API: APIs & Services → Library → search "Gmail API" → Enable
-4. Enable Calendar API: APIs & Services → Library → search "Google Calendar API" → Enable
-5. Configure OAuth consent screen:
-   - Google Auth Platform → Branding (or APIs & Services → OAuth consent screen)
-   - User Type: External
-   - Fill in app name and email
-   - Add scopes: `gmail.modify`, `gmail.compose`, `gmail.readonly`, `calendar`, `calendar.events`
-   - Add test user emails (each Google account they want to connect)
-6. Create OAuth client:
-   - Google Auth Platform → Clients (or APIs & Services → Credentials)
-   - Create OAuth client ID → Web application
-   - Authorized redirect URI: `http://localhost:3847/oauth/callback`
-   - Copy Client ID and Client Secret
-
-Wait for the user to complete each sub-step before proceeding.
-
-## Step 5: Authenticate Accounts
+**The plugin includes pre-baked OAuth credentials. Users do NOT need a GCP project.**
 
 Tell the user to run:
 ```bash
@@ -191,19 +176,32 @@ source ~/.nvm/nvm.sh && cd ~/.google-multi-mcp/server && node scripts/setup-toke
 ```
 
 This interactive script will:
-- Ask for Client ID and Client Secret
+- Use the built-in shared OAuth credentials automatically (no Client ID/Secret needed)
 - Let them add accounts with custom labels (e.g., "personal", "work")
 - Open browser for OAuth consent per account
 - Store everything in `~/.google-multi-mcp/config.json`
 
-## Step 6: Restart Claude
+**Expected browser flow:**
+1. Google sign-in page opens
+2. User signs in with their Gmail
+3. "This app isn't verified" warning appears — click **Advanced → Go to app (unsafe)**
+4. Grant permissions → success page appears → close the tab
+
+Print which credentials are in use. If the script says "Using default shared credentials",
+everything is working as expected.
+
+**Only if the user explicitly asks to use their own GCP project**, point them to:
+`~/.google-multi-mcp/server/scripts/setup-tokens.js --help` or the README for self-hosted
+credential instructions.
+
+## Step 5: Restart Claude
 
 Tell the user:
 > Fully quit Claude (Cmd+Q) and reopen it. The MCP server will connect automatically.
 
 After restart, verify by asking Claude to list calendar events or search emails.
 
-## Step 7: Post-Setup Verification
+## Step 6: Post-Setup Verification
 
 After the user restarts and comes back, verify the tools loaded:
 - Try to use `search_emails` or `list_calendar_events` with `account: "all"`

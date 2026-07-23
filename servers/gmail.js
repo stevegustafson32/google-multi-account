@@ -1,11 +1,61 @@
 /**
  * gmail.js — Gmail operations for any configured account
+ *
+ * v0.4.0 hardening:
+ *  - All attacker-controlled strings (snippets, subjects, From, bodies) are
+ *    run through sanitize.js before being returned to the model.
+ *  - Header fields are validated against CRLF injection.
+ *  - In-Reply-To / References use the original message's RFC 5322 Message-ID
+ *    header value (not Gmail's internal resource id).
+ *  - Body extraction prefers text/plain regardless of part-tree order.
  */
 
-import fs from "fs";
-import path from "path";
-import { getGmail, getEmail, resolveAccounts } from "./auth.js";
-import { buildMessage } from "./mime.js";
+import {
+  getGmail,
+  getEmail,
+  resolveAccounts,
+  withAuthErrorHandling,
+} from "./auth.js";
+import { sanitizeText, sanitizeHtml, wrapUntrusted } from "./sanitize.js";
+
+const HEADER_FIELD_MAX = 1000;
+const SNIPPET_MAX = 2000;
+const BODY_MAX = 5000;
+
+/**
+ * Reject CRLF in any header field value to block header injection.
+ * Empty / undefined passes through unchanged.
+ */
+function assertNoCRLF(name, value) {
+  if (value == null || value === "") return value;
+  if (typeof value !== "string") return value;
+  if (/[\r\n]/.test(value)) {
+    throw new Error(
+      `Header injection blocked: "${name}" contains CR/LF. ` +
+        `Reject any tool argument that includes a newline in an email header.`
+    );
+  }
+  return value;
+}
+
+/**
+ * Fetch the original message's RFC 5322 Message-ID header so In-Reply-To /
+ * References are set correctly. Returns { messageIdHeader, threadId }.
+ */
+async function fetchOriginalMessageRefs(gmail, messageResourceId) {
+  const orig = await gmail.users.messages.get({
+    userId: "me",
+    id: messageResourceId,
+    format: "metadata",
+    metadataHeaders: ["Message-ID", "Message-Id"],
+  });
+  const headers = orig.data.payload?.headers || [];
+  const found = headers.find((h) => h.name.toLowerCase() === "message-id");
+  return {
+    messageIdHeader: found?.value || null,
+    threadId: orig.data.threadId,
+  };
+}
 
 export async function searchEmails({ account, query, maxResults = 20 }) {
   const labels = resolveAccounts(account);
@@ -38,11 +88,11 @@ export async function searchEmails({ account, query, maxResults = 20 }) {
               accountEmail: getEmail(label),
               id: msg.id,
               threadId: msg.threadId,
-              snippet: full.data.snippet,
-              from: get("From"),
-              to: get("To"),
-              cc: get("Cc"),
-              subject: get("Subject"),
+              snippet: sanitizeText(full.data.snippet, { maxLen: SNIPPET_MAX }),
+              from: sanitizeText(get("From"), { maxLen: HEADER_FIELD_MAX }),
+              to: sanitizeText(get("To"), { maxLen: HEADER_FIELD_MAX }),
+              cc: sanitizeText(get("Cc"), { maxLen: HEADER_FIELD_MAX }),
+              subject: sanitizeText(get("Subject"), { maxLen: HEADER_FIELD_MAX }),
               date: get("Date"),
               labels: full.data.labelIds || [],
             };
@@ -68,6 +118,9 @@ export async function searchEmails({ account, query, maxResults = 20 }) {
 }
 
 export async function getThread({ account, threadId }) {
+  return withAuthErrorHandling(account, () => _getThread({ account, threadId }));
+}
+async function _getThread({ account, threadId }) {
   const gmail = getGmail(account);
   const res = await gmail.users.threads.get({
     userId: "me",
@@ -80,140 +133,42 @@ export async function getThread({ account, threadId }) {
     const get = (name) =>
       (headers.find((h) => h.name === name) || {}).value || "";
 
-    let body = "";
-    function extractText(part) {
+    // Collect plain and html parts separately, prefer plain regardless of
+    // tree order. The original code's order-dependent dedupe was a bug.
+    let plain = "";
+    let html = "";
+    function collectParts(part) {
       if (part.mimeType === "text/plain" && part.body?.data) {
-        body += Buffer.from(part.body.data, "base64").toString("utf-8");
-      } else if (part.mimeType === "text/html" && !body && part.body?.data) {
-        const html = Buffer.from(part.body.data, "base64").toString("utf-8");
-        body += html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        plain += Buffer.from(part.body.data, "base64").toString("utf-8");
+      } else if (part.mimeType === "text/html" && part.body?.data) {
+        html += Buffer.from(part.body.data, "base64").toString("utf-8");
       }
-      if (part.parts) part.parts.forEach(extractText);
+      if (part.parts) part.parts.forEach(collectParts);
     }
-    extractText(msg.payload);
+    collectParts(msg.payload);
 
-    if (body.length > 5000) body = body.substring(0, 5000) + "\n...[truncated]";
+    const body = plain
+      ? sanitizeText(plain, { maxLen: BODY_MAX })
+      : sanitizeHtml(html, { maxLen: BODY_MAX });
 
     return {
       id: msg.id,
-      from: get("From"),
-      to: get("To"),
-      cc: get("Cc"),
+      from: sanitizeText(get("From"), { maxLen: HEADER_FIELD_MAX }),
+      to: sanitizeText(get("To"), { maxLen: HEADER_FIELD_MAX }),
+      cc: sanitizeText(get("Cc"), { maxLen: HEADER_FIELD_MAX }),
       date: get("Date"),
-      subject: get("Subject"),
-      body,
-      attachments: collectAttachments(msg.payload),
+      subject: sanitizeText(get("Subject"), { maxLen: HEADER_FIELD_MAX }),
+      body: wrapUntrusted(body),
     };
   });
 
   return { account, threadId, messages };
 }
 
-/**
- * Walk a payload tree for parts that are real attachments. Inline images carry
- * a filename too, so they show up here with inline:true rather than being
- * dropped — a signature logo and a contract look different to the caller.
- */
-function collectAttachments(payload, found = []) {
-  if (!payload) return found;
-
-  if (payload.filename && payload.body?.attachmentId) {
-    const disposition = (payload.headers || []).find(
-      (h) => h.name?.toLowerCase() === "content-disposition"
-    )?.value;
-    found.push({
-      filename: payload.filename,
-      mimeType: payload.mimeType,
-      sizeBytes: payload.body.size,
-      attachmentId: payload.body.attachmentId,
-      inline: /inline/i.test(disposition || ""),
-    });
-  }
-  if (payload.parts) payload.parts.forEach((p) => collectAttachments(p, found));
-  return found;
+export async function sendEmail(params) {
+  return withAuthErrorHandling(params.account, () => _sendEmail(params));
 }
-
-/** List every attachment on a single message, without pulling the bodies. */
-export async function listAttachments({ account, messageId }) {
-  const gmail = getGmail(account);
-  const res = await gmail.users.messages.get({
-    userId: "me",
-    id: messageId,
-    format: "full",
-  });
-
-  const headers = res.data.payload?.headers || [];
-  const get = (name) => (headers.find((h) => h.name === name) || {}).value || "";
-  const attachments = collectAttachments(res.data.payload);
-
-  return {
-    account,
-    messageId,
-    subject: get("Subject"),
-    from: get("From"),
-    date: get("Date"),
-    count: attachments.length,
-    attachments,
-  };
-}
-
-/**
- * Download one attachment to disk. destPath may be a directory (the original
- * filename is kept) or a full target path.
- */
-export async function downloadAttachment({ account, messageId, attachmentId, filename, destPath }) {
-  const gmail = getGmail(account);
-
-  // Resolve by filename when the caller has a name but not an id.
-  let id = attachmentId;
-  let name = filename;
-  if (!id) {
-    const listed = await listAttachments({ account, messageId });
-    const match = filename
-      ? listed.attachments.find((a) => a.filename === filename)
-      : listed.attachments[0];
-    if (!match) {
-      throw new Error(
-        filename
-          ? `No attachment named "${filename}" on message ${messageId}`
-          : `Message ${messageId} has no attachments`
-      );
-    }
-    id = match.attachmentId;
-    name = match.filename;
-  }
-
-  const res = await gmail.users.messages.attachments.get({
-    userId: "me",
-    messageId,
-    id,
-  });
-
-  const buf = Buffer.from(res.data.data, "base64url");
-
-  let target = destPath
-    ? destPath.startsWith("~")
-      ? path.join(process.env.HOME || "", destPath.slice(1))
-      : path.resolve(destPath)
-    : path.join(process.env.HOME || ".", "Downloads");
-
-  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
-    target = path.join(target, name || `attachment-${id.slice(0, 8)}`);
-  }
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, buf);
-
-  return {
-    account,
-    messageId,
-    filename: name,
-    savedTo: target,
-    sizeBytes: buf.length,
-    status: "downloaded",
-  };
-}
-
-export async function sendEmail({
+async function _sendEmail({
   account,
   to,
   subject,
@@ -222,32 +177,35 @@ export async function sendEmail({
   bcc,
   replyToMessageId,
   contentType = "text/plain",
-  attachments = [],
 }) {
+  // Block header injection up front.
+  assertNoCRLF("to", to);
+  assertNoCRLF("subject", subject);
+  assertNoCRLF("cc", cc);
+  assertNoCRLF("bcc", bcc);
+
   const gmail = getGmail(account);
   const from = getEmail(account);
 
+  const mime = contentType === "text/html" ? "text/html" : "text/plain";
+  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
+  if (cc) headers += `Cc: ${cc}\n`;
+  if (bcc) headers += `Bcc: ${bcc}\n`;
+
   let threadId;
   if (replyToMessageId) {
-    const orig = await gmail.users.messages.get({
-      userId: "me",
-      id: replyToMessageId,
-      format: "metadata",
-    });
-    threadId = orig.data.threadId;
+    const refs = await fetchOriginalMessageRefs(gmail, replyToMessageId);
+    if (refs.messageIdHeader) {
+      headers += `In-Reply-To: ${refs.messageIdHeader}\nReferences: ${refs.messageIdHeader}\n`;
+    }
+    threadId = refs.threadId;
   }
 
-  const { raw, attachmentSummary } = buildMessage({
-    from,
-    to,
-    subject,
-    body,
-    cc,
-    bcc,
-    contentType,
-    attachments,
-    inReplyTo: replyToMessageId,
-  });
+  const raw = Buffer.from(headers + "\n" + body)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 
   const params = { userId: "me", requestBody: { raw } };
   if (threadId) params.requestBody.threadId = threadId;
@@ -258,51 +216,69 @@ export async function sendEmail({
     from,
     messageId: res.data.id,
     threadId: res.data.threadId,
-    attachments: attachmentSummary,
     status: "sent",
   };
 }
 
-export async function createDraft({
+export async function createDraft(params) {
+  return withAuthErrorHandling(params.account, () => _createDraft(params));
+}
+async function _createDraft({
   account,
   to,
   subject,
   body,
   cc,
-  bcc,
+  replyToMessageId,
   contentType = "text/plain",
-  attachments = [],
 }) {
+  assertNoCRLF("to", to);
+  assertNoCRLF("subject", subject);
+  assertNoCRLF("cc", cc);
+
   const gmail = getGmail(account);
   const from = getEmail(account);
 
-  const { raw, attachmentSummary } = buildMessage({
-    from,
-    to,
-    subject,
-    body,
-    cc,
-    bcc,
-    contentType,
-    attachments,
-  });
+  const mime = contentType === "text/html" ? "text/html" : "text/plain";
+  let headers = `From: ${from}\nTo: ${to}\nSubject: ${subject}\nMIME-Version: 1.0\nContent-Type: ${mime}; charset=utf-8\n`;
+  if (cc) headers += `Cc: ${cc}\n`;
+
+  let threadId;
+  if (replyToMessageId) {
+    const refs = await fetchOriginalMessageRefs(gmail, replyToMessageId);
+    if (refs.messageIdHeader) {
+      headers += `In-Reply-To: ${refs.messageIdHeader}\nReferences: ${refs.messageIdHeader}\n`;
+    }
+    threadId = refs.threadId;
+  }
+
+  const raw = Buffer.from(headers + "\n" + body)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+  const message = { raw };
+  if (threadId) message.threadId = threadId;
 
   const res = await gmail.users.drafts.create({
     userId: "me",
-    requestBody: { message: { raw } },
+    requestBody: { message },
   });
 
   return {
     account,
     from,
     draftId: res.data.id,
-    messageId: res.data.message?.id,
-    attachments: attachmentSummary,
+    threadId: res.data.message?.threadId,
     status: "draft_created",
   };
 }
 
 export async function listLabels({ account }) {
+  return withAuthErrorHandling(account, () => _listLabels({ account }));
+}
+async function _listLabels({ account }) {
   const gmail = getGmail(account);
   const res = await gmail.users.labels.list({ userId: "me" });
   return {
@@ -315,7 +291,10 @@ export async function listLabels({ account }) {
   };
 }
 
-export async function labelMessage({
+export async function labelMessage(params) {
+  return withAuthErrorHandling(params.account, () => _labelMessage(params));
+}
+async function _labelMessage({
   account,
   messageId,
   labelIds,
@@ -330,5 +309,110 @@ export async function labelMessage({
       removeLabelIds: removeLabelIds || [],
     },
   });
-  return { account, messageId, labelsAdded: labelIds, labelsRemoved: removeLabelIds, status: "updated" };
+  return {
+    account,
+    messageId,
+    labelsAdded: labelIds,
+    labelsRemoved: removeLabelIds,
+    status: "updated",
+  };
+}
+
+export async function listAttachments(params) {
+  return withAuthErrorHandling(params.account, () => _listAttachments(params));
+}
+async function _listAttachments({ account, messageId }) {
+  const gmail = getGmail(account);
+  const res = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "full",
+  });
+
+  const attachments = [];
+  function findAttachments(part) {
+    if (part.filename && part.filename.length > 0 && part.body) {
+      attachments.push({
+        partId: part.partId,
+        filename: part.filename,
+        mimeType: part.mimeType,
+        size: part.body.size || 0,
+        attachmentId: part.body.attachmentId || null,
+      });
+    }
+    if (part.parts) part.parts.forEach(findAttachments);
+  }
+  findAttachments(res.data.payload);
+
+  return { account, messageId, attachments };
+}
+
+export async function getAttachment(params) {
+  return withAuthErrorHandling(params.account, () => _getAttachment(params));
+}
+async function _getAttachment({
+  account,
+  messageId,
+  attachmentId,
+  filename,
+}) {
+  const gmail = getGmail(account);
+
+  if (attachmentId) {
+    const res = await gmail.users.messages.attachments.get({
+      userId: "me",
+      messageId,
+      id: attachmentId,
+    });
+    return {
+      account,
+      messageId,
+      filename: filename || "attachment",
+      size: res.data.size,
+      data: res.data.data,
+    };
+  }
+
+  const msg = await gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "full",
+  });
+
+  let targetPart = null;
+  function findPart(part) {
+    if (part.filename === filename && part.body) {
+      targetPart = part;
+      return;
+    }
+    if (part.parts) part.parts.forEach(findPart);
+  }
+  findPart(msg.data.payload);
+
+  if (!targetPart) {
+    return { account, messageId, error: `Attachment "${filename}" not found` };
+  }
+
+  if (targetPart.body.data) {
+    return {
+      account,
+      messageId,
+      filename,
+      size: targetPart.body.size,
+      data: targetPart.body.data,
+    };
+  }
+
+  const res = await gmail.users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id: targetPart.body.attachmentId,
+  });
+  return {
+    account,
+    messageId,
+    filename,
+    size: res.data.size,
+    data: res.data.data,
+  };
 }

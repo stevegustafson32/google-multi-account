@@ -1,20 +1,10 @@
 {
   "name": "google-multi-account",
-  "version": "0.3.0",
-  "description": "Access Gmail, Google Calendar, and Google Drive across multiple Google accounts from Claude. Search, send, draft, and manage emails with attachments; manage calendar events; upload, download, search, and share Drive files \u2014 all with a configurable account parameter. Hardened for Cowork with auto node discovery and graceful startup.",
+  "version": "0.4.0",
+  "description": "Access Gmail and Google Calendar across multiple Google accounts from Claude. Search, send, draft, and manage emails plus calendar events — all with a configurable account parameter. Pre-baked OAuth — no GCP setup needed. Supports HTML emails and attachment downloads.",
   "author": {
     "name": "Steve Gustafson"
   },
   "repository": "https://github.com/stevegustafson32/google-multi-account",
-  "keywords": [
-    "google",
-    "gmail",
-    "calendar",
-    "drive",
-    "multi-account",
-    "oauth",
-    "email",
-    "attachments",
-    "mcp"
-  ]
+  "keywords": ["google", "gmail", "calendar", "multi-account", "oauth", "email", "mcp"]
 }
