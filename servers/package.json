@@ -1,11 +1,12 @@
 {
   "name": "google-multi-account-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "setup": "node scripts/setup-tokens.js"
+    "setup": "node scripts/setup-tokens.js",
+    "test": "node --test test/"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
@@ -13,5 +14,8 @@
     "he": "^1.2.0",
     "open": "^10.1.0",
     "sanitize-html": "^2.13.0"
+  },
+  "devDependencies": {
+    "mailparser": "^3.9.28"
   }
 }

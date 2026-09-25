@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * index.js — Multi-Account Google MCP Server (v0.7.0)
+ * index.js — Multi-Account Google MCP Server (v0.8.0)
  *
  * Dynamically registers Gmail, Calendar, and Drive tools based on the accounts
  * configured in ~/.google-multi-mcp/config.json. Supports any number
@@ -15,17 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getAccountLabels, getAccounts, getConfigPath } from "./config.js";
-import {
-  searchEmails,
-  getThread,
-  sendEmail,
-  createDraft,
-  listLabels,
-  labelMessage,
-  listAttachments,
-  getAttachment,
-  downloadAttachment,
-} from "./gmail.js";
+import { registerGmailTools } from "./gmail-tools.js";
 import {
   listEvents,
   createEvent,
@@ -79,7 +69,7 @@ if (staleAccounts.length > 0) {
 
 const server = new McpServer({
   name: "google-multi-account",
-  version: "0.7.0",
+  version: "0.8.0",
   description:
     labels.length > 0
       ? `Multi-account Google MCP — Gmail, Calendar, and Drive for: ${accountList}. ` +
@@ -103,230 +93,9 @@ if (labels.length > 0) {
       `Which Google account(s): ${accountList}, or "all" to search across every account`
     );
 
-  // ── GMAIL TOOLS ──────────────────────────────────────────────
+  // ── GMAIL TOOLS (gmail-tools.js) ─────────────────────────────
 
-  server.tool(
-    "search_emails",
-    `Search emails across one or all Google accounts (${labels.join(", ")}). Returns message metadata.`,
-    {
-      account: AccountOrAllParam,
-      query: z
-        .string()
-        .describe(
-          "Gmail search query (same syntax as Gmail search bar). Examples: 'from:john@example.com', 'subject:invoice', 'is:unread newer_than:2d'"
-        ),
-      maxResults: z
-        .number()
-        .optional()
-        .default(20)
-        .describe("Max results to return (default 20, max 50)"),
-    },
-    async ({ account, query, maxResults }) => {
-      const results = await searchEmails({ account, query, maxResults });
-      return {
-        content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "get_email_thread",
-    "Get a full email thread including message bodies.",
-    {
-      account: AccountParam,
-      threadId: z.string().describe("Thread ID from search_emails results"),
-    },
-    async ({ account, threadId }) => {
-      const result = await getThread({ account, threadId });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "send_email",
-    `Send an email from any configured account (${labels.join(", ")}).`,
-    {
-      account: AccountParam,
-      to: z.string().describe("Recipient email address(es), comma-separated"),
-      subject: z.string().describe("Email subject line"),
-      body: z.string().describe("Email body text. If contentType is text/html, this should be valid HTML."),
-      cc: z.string().optional().describe("CC recipients, comma-separated"),
-      bcc: z.string().optional().describe("BCC recipients, comma-separated"),
-      replyToMessageId: z
-        .string()
-        .optional()
-        .describe("Message ID to reply to (threads the reply)"),
-      contentType: z
-        .enum(["text/plain", "text/html"])
-        .optional()
-        .default("text/plain")
-        .describe('Body format: "text/plain" (default) or "text/html" for rich formatting'),
-      attachments: z
-        .array(z.string())
-        .optional()
-        .describe(
-          "Local file paths to attach (absolute or ~/…). Total must stay under 20MB; " +
-            "for anything bigger use drive_upload and send the link."
-        ),
-    },
-    async ({ account, to, subject, body, cc, bcc, replyToMessageId, contentType, attachments }) => {
-      const result = await sendEmail({
-        account,
-        to,
-        subject,
-        body,
-        cc,
-        bcc,
-        replyToMessageId,
-        contentType,
-        attachments,
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "create_email_draft",
-    "Create an email draft in a specific account (does NOT send it). Pass replyToMessageId to thread the draft with an existing conversation.",
-    {
-      account: AccountParam,
-      to: z.string().describe("Recipient email address(es)"),
-      subject: z.string().describe("Email subject line"),
-      body: z.string().describe("Email body text. If contentType is text/html, this should be valid HTML."),
-      cc: z.string().optional().describe("CC recipients"),
-      bcc: z.string().optional().describe("BCC recipients"),
-      replyToMessageId: z
-        .string()
-        .optional()
-        .describe("Message ID to reply to (threads the draft with the original conversation)"),
-      contentType: z
-        .enum(["text/plain", "text/html"])
-        .optional()
-        .default("text/plain")
-        .describe('Body format: "text/plain" (default) or "text/html" for rich formatting'),
-      attachments: z
-        .array(z.string())
-        .optional()
-        .describe("Local file paths to attach (absolute or ~/…). Total must stay under 20MB."),
-    },
-    async ({ account, to, subject, body, cc, bcc, replyToMessageId, contentType, attachments }) => {
-      const result = await createDraft({
-        account, to, subject, body, cc, bcc, replyToMessageId, contentType, attachments,
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "list_email_labels",
-    "List all labels/folders for a Gmail account.",
-    { account: AccountParam },
-    async ({ account }) => {
-      const result = await listLabels({ account });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "label_email",
-    "Add or remove labels from an email message.",
-    {
-      account: AccountParam,
-      messageId: z.string().describe("Message ID to modify"),
-      labelIds: z
-        .array(z.string())
-        .optional()
-        .describe("Label IDs to ADD"),
-      removeLabelIds: z
-        .array(z.string())
-        .optional()
-        .describe("Label IDs to REMOVE"),
-    },
-    async ({ account, messageId, labelIds, removeLabelIds }) => {
-      const result = await labelMessage({
-        account,
-        messageId,
-        labelIds,
-        removeLabelIds,
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "list_attachments",
-    "List all attachments on a specific email message. Returns filename, MIME type, size, and attachmentId for each.",
-    {
-      account: AccountParam,
-      messageId: z.string().describe("Message ID (from search_emails results)"),
-    },
-    async ({ account, messageId }) => {
-      const result = await listAttachments({ account, messageId });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    "download_attachment",
-    "Save an email attachment straight to disk and return the path. Prefer this " +
-      "over get_attachment for anything large or binary — get_attachment returns " +
-      "base64 into the conversation.",
-    {
-      account: AccountParam,
-      messageId: z.string().describe("Message ID the attachment belongs to"),
-      attachmentId: z
-        .string()
-        .optional()
-        .describe("Attachment ID from list_attachments. Omit to select by filename."),
-      filename: z
-        .string()
-        .optional()
-        .describe("Attachment filename to match. Omit both to take the first attachment."),
-      destPath: z
-        .string()
-        .optional()
-        .describe("Destination folder or file path. Defaults to ~/Downloads."),
-    },
-    async (params) => {
-      const result = await downloadAttachment(params);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
-  );
-
-  server.tool(
-    "get_attachment",
-    "Download an email attachment. Returns the file data as base64url-encoded string. Use attachmentId from list_attachments, or specify filename to look it up.",
-    {
-      account: AccountParam,
-      messageId: z.string().describe("Message ID containing the attachment"),
-      attachmentId: z
-        .string()
-        .optional()
-        .describe("Attachment ID from list_attachments (preferred, faster)"),
-      filename: z
-        .string()
-        .optional()
-        .describe("Filename to look up if attachmentId not available"),
-    },
-    async ({ account, messageId, attachmentId, filename }) => {
-      const result = await getAttachment({ account, messageId, attachmentId, filename });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
+  registerGmailTools(server, { labels, AccountParam, AccountOrAllParam });
 
   // ── CALENDAR TOOLS ───────────────────────────────────────────
 

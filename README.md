@@ -105,11 +105,16 @@ See the `/setup` command or `skills/google-setup/references/gcp-walkthrough.md` 
 | Tool | Description |
 |------|-------------|
 | `search_emails` | Search emails across one or all accounts |
-| `get_email_thread` | Read a full email thread |
+| `get_email_thread` | Read a thread (newest 10 messages by default, bodies capped) |
+| `reply_to_email` | Reply inline in the thread: recipients, Re: subject, threading and quote filled in; drafts unless `send:true` |
 | `send_email` | Send from any connected account, with attachments |
-| `create_email_draft` | Create a draft (doesn't send), with attachments |
+| `create_email_draft` | Create a draft of a NEW email (doesn't send), with attachments |
+| `list_drafts` | List drafts with recipients, attachments, and whether each is threaded |
+| `update_draft` | Revise a draft in place; carries over anything not passed, incl. attachments |
+| `send_draft` | Send an existing draft exactly as built |
 | `list_attachments` | List files attached to a message |
-| `download_attachment` | Save an attachment to disk (preferred for large/binary) |
+| `download_attachment` | Save one attachment to disk by `partId` (never overwrites) |
+| `download_all_attachments` | Save every attachment on a message in one call |
 | `get_attachment` | Return an attachment as base64 |
 | `list_email_labels` | List Gmail labels/folders |
 | `label_email` | Add/remove labels from messages |

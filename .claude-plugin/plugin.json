@@ -1,6 +1,6 @@
 {
   "name": "google-multi-account",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Access Gmail, Google Calendar, and Google Drive across multiple Google accounts from Claude. Search, send, draft, and manage emails with attachments; manage calendar events; upload, download, search, and share Drive files \u2014 all with a configurable account parameter. Untrusted email content is sanitized before it reaches the model.",
   "author": {
     "name": "Steve Gustafson"
