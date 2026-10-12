@@ -6,7 +6,7 @@
  */
 
 import { google } from "googleapis";
-import { loadConfig, getAccounts, saveConfig } from "./config.js";
+import { loadConfig, getAccounts, saveConfig, getRefreshToken, storeRefreshToken } from "./config.js";
 import { getScopes } from "./scopes.js";
 
 // Kept as a named export for backwards compatibility; scopes.js is the source.
@@ -29,11 +29,20 @@ function getOAuthClient(label) {
     "http://localhost:3847/oauth/callback"
   );
 
-  oauth2.setCredentials({ refresh_token: account.refreshToken });
+  const refreshToken = getRefreshToken(account);
+  if (!refreshToken) {
+    throw new Error(
+      `No refresh token found for "${label}" in the keychain or config. ` +
+        "Run: cd ~/.google-multi-mcp/server && npm run setup -- --reauth"
+    );
+  }
+  oauth2.setCredentials({ refresh_token: refreshToken });
 
+  // Google rarely rotates refresh tokens, but when it does the new one goes
+  // to the same store the old one came from (keychain first, file fallback).
   oauth2.on("tokens", (tokens) => {
     if (tokens.refresh_token) {
-      account.refreshToken = tokens.refresh_token;
+      storeRefreshToken(account, tokens.refresh_token);
       saveConfig(config);
     }
   });

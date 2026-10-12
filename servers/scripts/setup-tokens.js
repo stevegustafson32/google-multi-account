@@ -12,6 +12,7 @@
  */
 
 import http from "http";
+import crypto from "crypto";
 import { URL } from "url";
 import { google } from "googleapis";
 import {
@@ -25,7 +26,22 @@ import {
 import readline from "readline";
 import { getScopes, SCOPE_VERSION, driveScope } from "../scopes.js";
 
-const REDIRECT_URI = "http://localhost:3847/oauth/callback";
+// Google's native-app guidance (RFC 8252 §8.3) prefers http://127.0.0.1:<port>.
+// The registered Web-client URI is still the localhost form, so that stays the
+// default until http://127.0.0.1:3847/oauth/callback is added in the console.
+// Then: GOOGLE_MULTI_REDIRECT_URI=http://127.0.0.1:3847/oauth/callback npm run setup
+const REDIRECT_URI =
+  process.env.GOOGLE_MULTI_REDIRECT_URI || "http://localhost:3847/oauth/callback";
+const CALLBACK_PORT = Number(new URL(REDIRECT_URI).port) || 3847;
+const CALLBACK_PATH = new URL(REDIRECT_URI).pathname;
+// Only loopback addresses are bound. `listen(port)` with no host binds every
+// interface (Node picks `::`), which let anything on the LAN hand us a code.
+const LOOPBACK_HOSTS = ["127.0.0.1", "::1"];
+const ALLOWED_HOST_HEADERS = new Set([
+  `localhost:${CALLBACK_PORT}`,
+  `127.0.0.1:${CALLBACK_PORT}`,
+  `[::1]:${CALLBACK_PORT}`,
+]);
 const SCOPES = getScopes();
 
 // `npm run setup -- --reauth` re-consents every account already in the config,
@@ -78,42 +94,83 @@ function ask(question) {
 async function authenticateAccount(clientId, clientSecret, label, email) {
   const oauth2 = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
 
+  // PKCE (S256) binds the authorization code to this process: a code captured
+  // in transit is useless without the verifier. `state` is a per-run nonce so
+  // the listener rejects any callback it did not initiate (CSRF on loopback).
+  // Both are "recommended" by Google for installed apps and MUST per RFC 8252.
+  const { codeVerifier, codeChallenge } = await oauth2.generateCodeVerifierAsync();
+  const state = crypto.randomBytes(32).toString("base64url");
+
   const authUrl = oauth2.generateAuthUrl({
     access_type: "offline",
     scope: SCOPES,
     prompt: "consent",
     login_hint: email,
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
   });
 
   console.log(`\n🔐 Connecting "${label}" (${email})...`);
   console.log(`   Your browser will open. Sign in with: ${email}\n`);
 
-  // Dynamic import for ESM 'open' package
+  // Dynamic import for ESM 'open' package. The URL is built by googleapis from
+  // our own constants, never from input, so the mcp-remote CVE-2025-6514 shape
+  // (attacker-controlled URL reaching a shell) does not apply here.
   const open = (await import("open")).default;
 
   return new Promise((resolve, reject) => {
+    // One listener per loopback family so a browser resolving localhost to
+    // ::1 still lands, without ever binding a non-loopback interface.
+    const servers = [];
+    let settled = false;
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      for (const srv of servers) srv.close();
+      if (err) reject(err);
+      else resolve();
+    };
+
     const timeout = setTimeout(() => {
-      server.close();
-      reject(new Error("Timed out waiting for OAuth callback (2 minutes)"));
+      finish(new Error("Timed out waiting for OAuth callback (2 minutes)"));
     }, 120_000);
 
-    const server = http.createServer(async (req, res) => {
-      const url = new URL(req.url, "http://localhost:3847");
-      if (url.pathname !== "/oauth/callback") {
+    const handler = async (req, res) => {
+      if (!ALLOWED_HOST_HEADERS.has(req.headers.host)) {
+        res.writeHead(421);
+        res.end("Misdirected request");
+        return;
+      }
+      const url = new URL(req.url, REDIRECT_URI);
+      if (url.pathname !== CALLBACK_PATH) {
         res.writeHead(404);
         res.end("Not found");
         return;
       }
 
+      if (url.searchParams.get("state") !== state) {
+        res.writeHead(400);
+        res.end("State mismatch — this callback was not started by the running setup. Ignored.");
+        return;
+      }
+
       const code = url.searchParams.get("code");
       if (!code) {
+        const reason = url.searchParams.get("error") || "missing authorization code";
         res.writeHead(400);
-        res.end("Missing authorization code");
+        res.end(`Authorization failed: ${reason}`);
+        finish(new Error(`Google returned: ${reason}`));
         return;
       }
 
       try {
-        const { tokens } = await oauth2.getToken(code);
+        const { tokens } = await oauth2.getToken({ code, codeVerifier });
+        if (!tokens.refresh_token) {
+          throw new Error("No refresh_token in response (consent screen may have skipped offline access)");
+        }
         addAccount(label, email, tokens.refresh_token, SCOPE_VERSION);
 
         res.writeHead(200, { "Content-Type": "text/html" });
@@ -123,26 +180,34 @@ async function authenticateAccount(clientId, clientSecret, label, email) {
             <p>${email} is now linked to Claude. You can close this tab.</p>
           </body></html>
         `);
-
-        clearTimeout(timeout);
-        server.close();
-        resolve();
+        finish();
       } catch (err) {
         res.writeHead(500);
         res.end("Token exchange failed: " + err.message);
-        clearTimeout(timeout);
-        server.close();
-        reject(err);
+        finish(err);
       }
-    });
+    };
 
-    server.listen(3847, () => {
-      open(authUrl).catch(() => {
-        console.log("   Could not open browser automatically.");
-        console.log("   Open this URL manually:\n");
-        console.log(`   ${authUrl}\n`);
+    let bound = 0;
+    for (const host of LOOPBACK_HOSTS) {
+      const srv = http.createServer(handler);
+      srv.on("error", (err) => {
+        // ::1 may be absent (IPv6 disabled). Only fail if nothing bound.
+        if (host === "::1" && err.code === "EADDRNOTAVAIL") return;
+        finish(new Error(`Could not listen on ${host}:${CALLBACK_PORT}: ${err.message}`));
       });
-    });
+      srv.listen(CALLBACK_PORT, host, () => {
+        servers.push(srv);
+        bound += 1;
+        if (bound === 1) {
+          open(authUrl).catch(() => {
+            console.log("   Could not open browser automatically.");
+            console.log("   Open this URL manually:\n");
+            console.log(`   ${authUrl}\n`);
+          });
+        }
+      });
+    }
   });
 }
 

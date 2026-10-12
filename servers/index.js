@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * index.js — Multi-Account Google MCP Server (v0.8.0)
+ * index.js — Multi-Account Google MCP Server (v0.9.0)
  *
  * Dynamically registers Gmail, Calendar, and Drive tools based on the accounts
  * configured in ~/.google-multi-mcp/config.json. Supports any number
@@ -14,7 +14,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getAccountLabels, getAccounts, getConfigPath } from "./config.js";
+import { getAccountLabels, getAccounts, getConfigPath, migrateTokensToKeychain } from "./config.js";
 import { registerGmailTools } from "./gmail-tools.js";
 import {
   listEvents,
@@ -32,11 +32,22 @@ import {
   driveFileInfo,
   driveShare,
 } from "./drive.js";
-import { accountNeedsReauth, driveScope } from "./scopes.js";
+import { accountNeedsReauth, driveScope, SCOPE_VERSION } from "./scopes.js";
 
 // ========================================
 // LOAD CONFIG (never crash on failure)
 // ========================================
+
+// v0.9.0: refresh tokens live in the OS keychain. Any still in config.json
+// from an older install move over here, before the first client is built.
+try {
+  const moved = migrateTokensToKeychain();
+  if (moved.length > 0) {
+    console.error(`[google-multi-account] moved refresh tokens to the keychain for: ${moved.join(", ")}`);
+  }
+} catch (err) {
+  console.error(`[google-multi-account] token migration skipped: ${err.message}`);
+}
 
 const accounts = getAccounts();
 const labels = getAccountLabels();
@@ -55,21 +66,51 @@ const accountList = accounts
   .map((a) => `"${a.label}" (${a.email})`)
   .join(", ");
 
-// Drive arrived in v0.5.0. Tokens minted before it were consented without the
-// Drive scope, so Drive calls 403 with a confusing message. Name the stale
-// accounts at startup instead — the tools still register either way.
+// Tokens consented under an older scope set keep working (older sets were
+// supersets), but name them at startup so the next --reauth is not a surprise.
+// Pre-v2 tokens lack Drive entirely and 403 on Drive calls.
 const staleAccounts = accounts.filter(accountNeedsReauth).map((a) => a.label);
 if (staleAccounts.length > 0) {
   console.error(
-    `[google-multi-account] Drive scope not yet consented for: ${staleAccounts.join(", ")}.\n` +
-      "  Drive tools will fail until you re-authorize:\n" +
+    `[google-multi-account] consented under an older scope set (need v${SCOPE_VERSION}): ${staleAccounts.join(", ")}.\n` +
+      "  Re-authorize when convenient:\n" +
       "  cd ~/.google-multi-mcp/server && npm run setup -- --reauth"
   );
 }
 
+// Tools that send, share, or delete prompt on EVERY call in Claude Code, even
+// in auto / acceptEdits / bypassPermissions, with no "don't ask again" and no
+// allow-rule bypass (code.claude.com/docs/en/mcp#require-approval-for-a-specific-tool).
+// This is the deterministic gate against a hostile email steering the model
+// into forwarding mail or sharing a Drive file. Reads stay unprompted.
+// Trim this list to loosen it; adding a name is all it takes to tighten it.
+const SIDE_EFFECT_TOOLS = new Set([
+  "send_email",
+  "reply_to_email",
+  "send_draft",
+  "drive_share",
+  "create_calendar_event",
+  "update_calendar_event",
+  "delete_calendar_event",
+]);
+const REQUIRES_USER_INTERACTION = Object.freeze({
+  "anthropic/requiresUserInteraction": true,
+});
+
+function markSideEffectTools(mcpServer) {
+  const originalTool = mcpServer.tool.bind(mcpServer);
+  mcpServer.tool = (name, ...rest) => {
+    const registered = originalTool(name, ...rest);
+    if (SIDE_EFFECT_TOOLS.has(name)) {
+      registered.update({ _meta: REQUIRES_USER_INTERACTION });
+    }
+    return registered;
+  };
+}
+
 const server = new McpServer({
   name: "google-multi-account",
-  version: "0.8.0",
+  version: "0.9.0",
   description:
     labels.length > 0
       ? `Multi-account Google MCP — Gmail, Calendar, and Drive for: ${accountList}. ` +
@@ -77,6 +118,8 @@ const server = new McpServer({
         "identity's Drive/mailbox is reachable without switching logins."
       : "Multi-account Google MCP — no accounts configured yet. Run /setup.",
 });
+
+markSideEffectTools(server);
 
 // ========================================
 // REGISTER TOOLS (only if accounts exist)

@@ -22,16 +22,12 @@
 
 import { loadConfig } from "./config.js";
 
-export const GMAIL_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/gmail.compose",
-  "https://www.googleapis.com/auth/gmail.readonly",
-];
+// gmail.modify already grants everything gmail.readonly and gmail.compose do
+// (read, labels, drafts, send). calendar already covers calendar.events.
+// Five scopes were consented through v0.8.0; three is the real set.
+export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"];
 
-export const CALENDAR_SCOPES = [
-  "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/calendar.events",
-];
+export const CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"];
 
 export const DRIVE_SCOPE_FULL = "https://www.googleapis.com/auth/drive";
 export const DRIVE_SCOPE_FILE = "https://www.googleapis.com/auth/drive.file";
@@ -52,8 +48,13 @@ export function getScopes() {
  * at setup time — see scripts/setup-tokens.js.
  */
 export function accountNeedsReauth(account) {
-  return !account?.scopeVersion || account.scopeVersion < 2;
+  return !account?.scopeVersion || account.scopeVersion < SCOPE_VERSION;
 }
 
-/** Bump when the scope list changes in a way that needs fresh consent. */
-export const SCOPE_VERSION = 2;
+/**
+ * Bump when the scope list changes in a way that needs fresh consent.
+ *   1  Gmail + Calendar
+ *   2  + Drive (v0.5.0)
+ *   3  trimmed to gmail.modify / calendar / drive, PKCE setup (v0.9.0)
+ */
+export const SCOPE_VERSION = 3;
