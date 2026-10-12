@@ -39,16 +39,19 @@ Step-by-step instructions for creating a Google Cloud Platform project with OAut
 
 1. Go to Google Auth Platform → Clients (or APIs & Services → Credentials)
 2. Click "Create Credentials" → "OAuth client ID"
-3. Application type: **Web application**
+3. Application type: **Desktop app**
 4. Name: "Claude MCP" (or anything)
-5. Under "Authorized redirect URIs", click "Add URI":
-   - Enter: `http://localhost:3847/oauth/callback`
+5. No redirect URI to register. Desktop clients accept any loopback address;
+   the setup script uses `http://127.0.0.1:3847/oauth/callback` with PKCE (S256).
 6. Click Create
 7. **Copy the Client ID and Client Secret** — you'll need these for the setup script
 
 ## 5. Important Notes
 
-- The app will be in "Testing" mode, which means only test users can authenticate
+- The app starts in "Testing" mode: only test users can authenticate AND refresh
+  tokens expire every 7 days. Go to Audience → Publishing status → **Publish app**.
+  Production without verification just shows an "unverified app" click-through
+  (Advanced → Go to app). Personal-use apps under 100 users never need verification.
 - Google shows an "unverified app" warning — this is normal, click through it
 - Test user status allows up to 100 users
 - To remove the warning for public use, you'd need to go through Google's verification process

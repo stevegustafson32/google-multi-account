@@ -94,8 +94,9 @@ The Claude Desktop config calls `/bin/bash ~/.google-multi-mcp/start.sh` which a
 
 You'll need a GCP project with:
 - Gmail API and Google Calendar API enabled
-- OAuth 2.0 client (Web application type)
-- Redirect URI: `http://localhost:3847/oauth/callback`
+- OAuth 2.0 client, **Desktop app** type (no redirect URI to register; the setup
+  script listens on `http://127.0.0.1:3847/oauth/callback`, loopback only, with PKCE)
+- Consent screen published to **Production** (Testing mode expires refresh tokens every 7 days)
 - Test users added for each Google account you want to connect
 
 See the `/setup` command or `skills/google-setup/references/gcp-walkthrough.md` for detailed instructions.
@@ -154,10 +155,10 @@ All config is stored in `~/.google-multi-mcp/config.json`:
 ```json
 {
   "clientId": "your-client-id.apps.googleusercontent.com",
-  "clientSecret": "GOCSPX-...",
+  "clientSecret": "GOCSPX-your-client-secret",
   "accounts": [
-    { "label": "personal", "email": "you@gmail.com", "refreshToken": "...", "scopeVersion": 2 },
-    { "label": "work", "email": "you@company.com", "refreshToken": "...", "scopeVersion": 2 }
+    { "label": "personal", "email": "you@gmail.com", "tokenStore": "keychain", "scopeVersion": 3 },
+    { "label": "work", "email": "you@company.com", "tokenStore": "keychain", "scopeVersion": 3 }
   ],
   "driveScope": "full"
 }

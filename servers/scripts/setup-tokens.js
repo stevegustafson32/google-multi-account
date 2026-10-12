@@ -26,12 +26,12 @@ import {
 import readline from "readline";
 import { getScopes, SCOPE_VERSION, driveScope } from "../scopes.js";
 
-// Google's native-app guidance (RFC 8252 §8.3) prefers http://127.0.0.1:<port>.
-// The registered Web-client URI is still the localhost form, so that stays the
-// default until http://127.0.0.1:3847/oauth/callback is added in the console.
-// Then: GOOGLE_MULTI_REDIRECT_URI=http://127.0.0.1:3847/oauth/callback npm run setup
+// Google's native-app guidance (RFC 8252 §8.3) prefers http://127.0.0.1:<port>,
+// and a Desktop-app client accepts it without registration. Installs that still
+// use a legacy Web-application client registered for the localhost form:
+//   GOOGLE_MULTI_REDIRECT_URI=http://localhost:3847/oauth/callback npm run setup
 const REDIRECT_URI =
-  process.env.GOOGLE_MULTI_REDIRECT_URI || "http://localhost:3847/oauth/callback";
+  process.env.GOOGLE_MULTI_REDIRECT_URI || "http://127.0.0.1:3847/oauth/callback";
 const CALLBACK_PORT = Number(new URL(REDIRECT_URI).port) || 3847;
 const CALLBACK_PATH = new URL(REDIRECT_URI).pathname;
 // Only loopback addresses are bound. `listen(port)` with no host binds every
@@ -233,9 +233,8 @@ async function main() {
     console.log("Create one — 5 minutes, one time:");
     console.log("  1. https://console.cloud.google.com  → create/pick a project");
     console.log("  2. Enable the Gmail, Google Calendar, and Google Drive APIs");
-    console.log("  3. OAuth consent screen: External, add yourself as a test user");
-    console.log("  4. Credentials → Create OAuth client ID → Web application");
-    console.log("     Authorized redirect URI:  http://localhost:3847/oauth/callback");
+    console.log("  3. Audience: External, then Publish app (Testing mode expires tokens in 7 days)");
+    console.log("  4. Clients → Create client → Desktop app (no redirect URI needed)");
     console.log("  5. Copy the Client ID and Client Secret below.");
     console.log("  (Full walkthrough: skills/google-setup/references/gcp-walkthrough.md)\n");
 
