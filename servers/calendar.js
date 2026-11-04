@@ -177,6 +177,76 @@ export async function deleteEvent({ account, eventId }) {
   return { account, eventId, status: "deleted" };
 }
 
+async function defaultListEvents(label, tMin, tMax) {
+  const cal = getCalendar(label);
+  return cal.events.list({
+    calendarId: "primary",
+    timeMin: tMin.toISOString(),
+    timeMax: tMax.toISOString(),
+    singleEvents: true,
+    orderBy: "startTime",
+    maxResults: 200,
+    timeZone: DEFAULT_TZ,
+  });
+}
+
+/**
+ * Read every account's events. A failed account is reported, never dropped:
+ * an unreadable calendar must not be indistinguishable from an empty one.
+ */
+export async function collectBusySlots(
+  accounts,
+  tMin,
+  tMax,
+  listEvents = defaultListEvents
+) {
+  const allBusy = [];
+  const unreadable = [];
+
+  await Promise.all(
+    accounts.map(async (acct) => {
+      try {
+        const res = await listEvents(acct.label, tMin, tMax);
+        for (const e of res.data.items || []) {
+          if (e.start?.date) continue; // skip all-day
+          const declined = (e.attendees || []).some(
+            (a) => a.self && a.responseStatus === "declined"
+          );
+          if (declined) continue;
+
+          allBusy.push({
+            start: new Date(e.start.dateTime),
+            end: new Date(e.end.dateTime),
+            summary: e.summary,
+            account: acct.label,
+          });
+        }
+      } catch (err) {
+        unreadable.push({
+          account: acct.label,
+          email: acct.email,
+          error: err?.message || String(err),
+        });
+      }
+    })
+  );
+
+  return { allBusy, unreadable };
+}
+
+/**
+ * Fail when no calendar could be read. Reporting free slots from an unread
+ * calendar is worse than an error: the caller cannot tell the difference.
+ */
+export function assertCalendarsReadable(accounts, unreadable) {
+  if (unreadable.length === accounts.length) {
+    throw new Error(
+      "Could not read any configured calendar: " +
+        unreadable.map((u) => `${u.account} (${u.email}): ${u.error}`).join("; ")
+    );
+  }
+}
+
 export async function findFreeTime({
   timeMin,
   timeMax,
@@ -195,40 +265,10 @@ export async function findFreeTime({
   const tMin = timeMin ? new Date(timeMin) : now;
   const tMax = timeMax ? new Date(timeMax) : weekLater;
 
-  // Fetch all events from all accounts
-  const allBusy = [];
-  await Promise.all(
-    accounts.map(async (acct) => {
-      try {
-        const cal = getCalendar(acct.label);
-        const res = await cal.events.list({
-          calendarId: "primary",
-          timeMin: tMin.toISOString(),
-          timeMax: tMax.toISOString(),
-          singleEvents: true,
-          orderBy: "startTime",
-          maxResults: 200,
-          timeZone: DEFAULT_TZ,
-        });
-        for (const e of res.data.items || []) {
-          if (e.start?.date) continue; // skip all-day
-          const declined = (e.attendees || []).some(
-            (a) => a.self && a.responseStatus === "declined"
-          );
-          if (declined) continue;
+  const { allBusy, unreadable } = await collectBusySlots(accounts, tMin, tMax);
 
-          allBusy.push({
-            start: new Date(e.start.dateTime),
-            end: new Date(e.end.dateTime),
-            summary: e.summary,
-            account: acct.label,
-          });
-        }
-      } catch (err) {
-        // Skip failed accounts
-      }
-    })
-  );
+  // Any "free" slot from an unread calendar would be a fiction.
+  assertCalendarsReadable(accounts, unreadable);
 
   // Sort and merge overlapping busy times
   allBusy.sort((a, b) => a.start - b.start);
@@ -309,6 +349,9 @@ export async function findFreeTime({
     range: { from: tMin.toISOString(), to: tMax.toISOString() },
     minSlotMinutes: duration,
     workingHoursOnly,
+    // Present only when some account could not be read: the slots below are
+    // then free only with respect to the calendars that answered.
+    ...(unreadable.length ? { unreadableAccounts: unreadable } : {}),
     freeSlots,
   };
 }
