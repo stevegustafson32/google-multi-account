@@ -120,13 +120,16 @@ function freePath(dir, name) {
   return candidate;
 }
 
-/** Resolve where a part lands. A directory (existing, or ending in /) gets a safe name. */
-function targetFor(destPath, part) {
+/** Resolve where a part lands. A directory (existing, ending in /, or a new path with no extension) gets a safe name. */
+export function targetFor(destPath, part) {
   const dest = destPath ? expandHome(destPath) : path.join(os.homedir(), "Downloads");
   const looksLikeDir =
     !destPath ||
     /[\\/]$/.test(destPath) ||
-    (fs.existsSync(dest) && fs.statSync(dest).isDirectory());
+    (fs.existsSync(dest) && fs.statSync(dest).isDirectory()) ||
+    // A path that does not exist yet and carries no extension is a folder the
+    // caller wants created; "…\Downloads\report.pdf" stays a file path.
+    (!fs.existsSync(dest) && path.extname(dest) === "");
   if (!looksLikeDir) return dest;
   // Strip any path separators a hostile sender put in the filename so the
   // write can't escape the destination directory.
